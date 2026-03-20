@@ -1,0 +1,53 @@
+# defense-kit security baseline
+# Define your organization's minimum security requirements
+
+os:
+  disk_encryption: required
+  firewall_enabled: required
+  auto_updates: required
+  screen_lock: required
+  screen_lock_timeout_seconds: 300
+
+ssh:
+  permit_root_login: false
+  password_authentication: false
+  pubkey_authentication: true
+  max_auth_tries: 3
+  minimum_key_bits: 4096
+
+network:
+  allowed_listening_ports: [22, 80, 443]
+  deny_incoming_default: true
+  allow_outgoing_default: true
+
+code:
+  semgrep_config: "auto"
+  bandit_severity: "medium"
+  max_allowed_findings:
+    critical: 0
+    high: 0
+    medium: 10
+    low: 50
+
+secrets:
+  scan_git_history: true
+  block_env_files: true
+  allowed_key_types: ["ed25519", "rsa-4096"]
+
+dependencies:
+  max_critical_cves: 0
+  max_high_cves: 0
+  block_unmaintained: true
+  license_allowlist: ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC"]
+
+containers:
+  require_non_root_user: true
+  require_healthcheck: true
+  block_latest_tag: true
+  require_pinned_versions: true
+
+git:
+  require_signed_commits: false
+  require_branch_protection: true
+  require_pr_reviews: 1
+  require_status_checks: true

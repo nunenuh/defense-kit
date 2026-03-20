@@ -1,0 +1,37 @@
+services:
+  defense-kit:
+    image: ghcr.io/nunenuh/defense-kit:latest
+    build: .
+    container_name: defense-kit
+    hostname: defense-kit
+
+    privileged: false
+    user: root
+
+    security_opt:
+      - no-new-privileges:true
+    pid: host
+    ipc: shareable
+    network_mode: host
+
+    volumes:
+      # Code/repos to scan (read-only)
+      - ${TARGET_PATH:-./target}:/defense-kit/target:ro
+
+      # Output directory (findings persist)
+      - ${OUTPUT_PATH:-./outputs}:/defense-kit/outputs
+
+      # Policies
+      - ./policies:/defense-kit/policies:ro
+
+    environment:
+      - TERM=xterm-256color
+
+    stdin_open: true
+    tty: true
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2"
