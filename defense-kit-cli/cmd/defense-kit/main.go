@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/baseline"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/comply"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/monitor"
@@ -55,6 +56,7 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newReportCmd())
 	root.AddCommand(newMonitorCmd())
 	root.AddCommand(newScheduleCmd())
+	root.AddCommand(newComplyCmd())
 
 	return root
 }
@@ -1010,5 +1012,82 @@ func runScheduleStatus() error {
 	fmt.Fprintf(os.Stdout, "Scheduled scanning: enabled\n")
 	fmt.Fprintf(os.Stdout, "  Backend:  %s\n", st.Backend)
 	fmt.Fprintf(os.Stdout, "  Interval: %s\n", st.Interval)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Comply command
+// ---------------------------------------------------------------------------
+
+func newComplyCmd() *cobra.Command {
+	var framework string
+
+	cmd := &cobra.Command{
+		Use:   "comply",
+		Short: "Map findings to compliance frameworks",
+		Long: `comply runs a full scan and maps the findings to a compliance framework.
+
+Supported frameworks:
+  cis    CIS Benchmarks for Linux (default)
+  soc2   SOC 2 controls (future)
+  owasp  OWASP controls (future)`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runComply(cfgFile, framework)
+		},
+	}
+
+	cmd.Flags().StringVar(&framework, "framework", "cis", "compliance framework: cis, soc2, owasp")
+
+	return cmd
+}
+
+func runComply(cfgPath string, frameworkStr string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	timeout, err := time.ParseDuration(cfg.Scan.Timeout)
+	if err != nil {
+		timeout = 60 * time.Second
+	}
+
+	toolRunner := tools.NewRunner()
+	opts := scanner.ScanOptions{
+		ExcludePaths: cfg.Scan.ExcludePaths,
+		Timeout:      timeout,
+		Concurrency:  cfg.Scan.Concurrency,
+		UseExtTools:  cfg.Tools.PreferExternal,
+		Verbose:      verbose,
+		ToolRunner:   toolRunner,
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	fmt.Fprintln(os.Stdout, "Running full scan for compliance mapping...")
+
+	reg := defaultRegistry()
+	engine := scanner.NewEngine(reg)
+	results := engine.Run(ctx, opts)
+
+	var allFindings []scanner.Finding
+	for _, r := range results {
+		allFindings = append(allFindings, r.Findings...)
+	}
+
+	fmt.Fprintf(os.Stdout, "Scan complete: %d finding(s) found.\n\n", len(allFindings))
+
+	fw := comply.Framework(strings.ToLower(frameworkStr))
+	switch fw {
+	case comply.FrameworkCIS, comply.FrameworkSOC2, comply.FrameworkOWASP:
+		// valid
+	default:
+		return fmt.Errorf("unknown framework %q — supported: cis, soc2, owasp", frameworkStr)
+	}
+
+	compResult := comply.MapFindings(allFindings, fw)
+	fmt.Fprint(os.Stdout, comply.FormatReport(compResult))
+
 	return nil
 }
