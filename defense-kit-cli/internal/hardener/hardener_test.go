@@ -384,6 +384,181 @@ func TestExecuteRollback_FileRestore(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Task 4: Engine
+// ---------------------------------------------------------------------------
+
+// succeedingMockHardener is a mockHardener that successfully applies and
+// verifies any finding it claims to fix.
+type succeedingMockHardener struct {
+	name    string
+	canFix  func(scanner.Finding) bool
+	applied []hardener.FixPlan
+}
+
+func (s *succeedingMockHardener) Name() string { return s.name }
+func (s *succeedingMockHardener) CanFix(f scanner.Finding) bool {
+	if s.canFix != nil {
+		return s.canFix(f)
+	}
+	return true
+}
+func (s *succeedingMockHardener) Preview(f scanner.Finding) hardener.FixPlan {
+	return hardener.FixPlan{
+		Finding:     f,
+		Description: "mock fix for " + f.ID,
+		Actions:     []hardener.FixAction{},
+	}
+}
+func (s *succeedingMockHardener) Apply(_ context.Context, plan hardener.FixPlan) error {
+	s.applied = append(s.applied, plan)
+	return nil
+}
+func (s *succeedingMockHardener) Verify(_ context.Context, _ hardener.FixPlan) error { return nil }
+func (s *succeedingMockHardener) Rollback(_ context.Context, _ hardener.FixPlan) error {
+	return nil
+}
+
+func TestEngine_DryRun(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	h := &mockHardener{
+		name:   "mock",
+		canFix: func(f scanner.Finding) bool { return f.Scanner == "ssh" },
+	}
+	reg.Register(h)
+
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "f1", Scanner: "ssh", Title: "PermitRootLogin", Severity: scanner.SevHigh},
+		{ID: "f2", Scanner: "network", Title: "Open port"},
+	}
+
+	opts := hardener.HardenOptions{
+		Mode:   hardener.ModeDryRun,
+		DryRun: true,
+	}
+
+	results, err := engine.Run(context.Background(), findings, opts)
+	if err != nil {
+		t.Fatalf("Engine.Run dry run error: %v", err)
+	}
+
+	// Only the SSH finding is fixable.
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Applied {
+		t.Error("expected Applied=false in dry run")
+	}
+	if results[0].Finding.ID != "f1" {
+		t.Errorf("unexpected finding ID %q", results[0].Finding.ID)
+	}
+}
+
+func TestEngine_RunAppliesAndVerifies(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	mock := &succeedingMockHardener{
+		name:   "mock",
+		canFix: func(f scanner.Finding) bool { return f.Scanner == "ssh" },
+	}
+	reg.Register(mock)
+
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "f1", Scanner: "ssh", Title: "PermitRootLogin", Severity: scanner.SevLow},
+	}
+
+	opts := hardener.HardenOptions{
+		Mode: hardener.ModeInteractive,
+	}
+
+	results, err := engine.Run(context.Background(), findings, opts)
+	if err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if !r.Applied {
+		t.Errorf("expected Applied=true, got false; error=%q", r.Error)
+	}
+	if !r.Verified {
+		t.Errorf("expected Verified=true, got false")
+	}
+	if r.Error != "" {
+		t.Errorf("unexpected error: %q", r.Error)
+	}
+}
+
+func TestEngine_AutoLow_SkipsHighSeverity(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	mock := &succeedingMockHardener{
+		name:   "mock",
+		canFix: func(f scanner.Finding) bool { return f.Scanner == "ssh" },
+	}
+	reg.Register(mock)
+
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "low", Scanner: "ssh", Title: "PermitEmptyPasswords", Severity: scanner.SevLow},
+		{ID: "high", Scanner: "ssh", Title: "PermitRootLogin", Severity: scanner.SevHigh},
+		{ID: "critical", Scanner: "ssh", Title: "PasswordAuthentication", Severity: scanner.SevCritical},
+	}
+
+	opts := hardener.HardenOptions{
+		Mode: hardener.ModeAutoLow,
+	}
+
+	results, err := engine.Run(context.Background(), findings, opts)
+	if err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	for _, r := range results {
+		switch r.Finding.ID {
+		case "low":
+			if !r.Applied {
+				t.Errorf("LOW finding should be applied in AutoLow mode")
+			}
+		case "high", "critical":
+			if r.Applied {
+				t.Errorf("HIGH/CRITICAL finding %q should NOT be applied in AutoLow mode", r.Finding.ID)
+			}
+		}
+	}
+}
+
+func TestEngine_DryRun_NoFiles(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	// Empty registry — nothing is fixable.
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "f1", Scanner: "ssh"},
+	}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results with empty registry, got %d", len(results))
+	}
+}
+
 func TestExecuteRollback_Reverse(t *testing.T) {
 	// Verify steps are executed in reverse order by tracking order of restores.
 	srcDir := t.TempDir()
