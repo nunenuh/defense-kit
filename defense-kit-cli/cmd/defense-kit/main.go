@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
 var (
@@ -141,6 +143,8 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 		categories = cfg.Scan.Categories
 	}
 
+	toolRunner := tools.NewRunner()
+
 	opts := scanner.ScanOptions{
 		ExcludePaths: cfg.Scan.ExcludePaths,
 		Categories:   categories,
@@ -150,6 +154,7 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 		Quick:        quick,
 		Diff:         diff,
 		Verbose:      verbose,
+		ToolRunner:   toolRunner,
 	}
 
 	ctx, cancel := signalContext()
@@ -452,6 +457,33 @@ func runToolsCheck() error {
 	available := reg.Available()
 	fmt.Fprintf(os.Stdout, "\n%d of %d scanners available in current environment.\n",
 		len(available), len(all))
+
+	// External tools
+	toolReg := tools.DefaultToolRegistry()
+	statuses := toolReg.CheckAll()
+
+	fmt.Fprintf(os.Stdout, "\nExternal tools (%d registered):\n\n", len(statuses))
+	fmt.Fprintf(os.Stdout, "%-20s %-15s %-10s %-12s %s\n", "NAME", "CATEGORY", "INSTALLED", "VERSION", "PATH")
+	fmt.Fprintf(os.Stdout, "%s\n", strings.Repeat("-", 80))
+
+	installed := 0
+	for _, s := range statuses {
+		instStr := "no"
+		if s.Installed {
+			instStr = "yes"
+			installed++
+		}
+		ver := s.Version
+		if ver == "" {
+			ver = "-"
+		}
+		path := s.Path
+		if path == "" {
+			path = "-"
+		}
+		fmt.Fprintf(os.Stdout, "%-20s %-15s %-10s %-12s %s\n", s.Def.Name, s.Def.Category, instStr, ver, path)
+	}
+	fmt.Fprintf(os.Stdout, "\n%d of %d external tools installed.\n", installed, len(statuses))
 
 	return nil
 }
