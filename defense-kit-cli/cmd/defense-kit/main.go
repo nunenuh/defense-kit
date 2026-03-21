@@ -16,8 +16,10 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/baseline"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/monitor"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/schedule"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
@@ -51,6 +53,8 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newBaselineCmd())
 	root.AddCommand(newToolsCmd())
 	root.AddCommand(newReportCmd())
+	root.AddCommand(newMonitorCmd())
+	root.AddCommand(newScheduleCmd())
 
 	return root
 }
@@ -815,5 +819,196 @@ func runReportHTML(outputPath string) error {
 	}
 
 	fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", outputPath)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Monitor command
+// ---------------------------------------------------------------------------
+
+func newMonitorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "monitor",
+		Short: "Quick scan + diff against baseline (for /loop)",
+		Long:  `monitor performs a quick security scan and shows the diff against the stored baseline.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMonitor()
+		},
+	}
+}
+
+func runMonitor() error {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	reg := defaultRegistry()
+	blPath := baselinePath()
+	outDir := outputsDir()
+
+	mon := monitor.New(reg, blPath, outDir)
+
+	timeout, err := time.ParseDuration(cfg.Scan.Timeout)
+	if err != nil {
+		timeout = 60 * time.Second
+	}
+
+	toolRunner := tools.NewRunner()
+
+	// Use QuickCategories from config when available.
+	categories := cfg.Monitor.QuickCategories
+	if len(categories) == 0 {
+		categories = cfg.Scan.Categories
+	}
+
+	opts := scanner.ScanOptions{
+		ExcludePaths: cfg.Scan.ExcludePaths,
+		Categories:   categories,
+		Timeout:      timeout,
+		Concurrency:  cfg.Scan.Concurrency,
+		UseExtTools:  cfg.Tools.PreferExternal,
+		Quick:        true,
+		Verbose:      verbose,
+		ToolRunner:   toolRunner,
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	result, err := mon.Run(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("monitor run: %w", err)
+	}
+
+	if result.IsFirstRun {
+		fmt.Fprintf(os.Stdout, "Baseline created at %s\n", result.BaselinePath)
+		return nil
+	}
+
+	diff := result.Diff
+	fmt.Fprintf(os.Stdout, "Monitor: %d new, %d resolved, %d changed findings\n",
+		len(diff.New), len(diff.Resolved), len(diff.Changed))
+
+	if len(diff.New) > 0 {
+		fmt.Fprintf(os.Stdout, "\nNEW findings:\n")
+		for _, f := range diff.New {
+			fmt.Fprintf(os.Stdout, "  [%s] %s — %s\n", f.Severity.String(), f.Title, f.Location)
+		}
+	}
+
+	if len(diff.Resolved) > 0 {
+		fmt.Fprintf(os.Stdout, "\nRESOLVED findings (good news):\n")
+		for _, f := range diff.Resolved {
+			fmt.Fprintf(os.Stdout, "  [%s] %s — %s\n", f.Severity.String(), f.Title, f.Location)
+		}
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Schedule command group
+// ---------------------------------------------------------------------------
+
+func newScheduleCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "schedule",
+		Short: "Manage scheduled scans",
+		Long:  `schedule manages periodic automated security scans using systemd or cron.`,
+	}
+
+	cmd.AddCommand(newScheduleEnableCmd())
+	cmd.AddCommand(newScheduleDisableCmd())
+	cmd.AddCommand(newScheduleStatusCmd())
+
+	return cmd
+}
+
+func newScheduleEnableCmd() *cobra.Command {
+	var (
+		interval string
+		mode     string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "enable",
+		Short: "Enable scheduled scanning",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScheduleEnable(interval, mode)
+		},
+	}
+
+	cmd.Flags().StringVar(&interval, "interval", "6h", "scan interval (e.g. 30m, 6h, 24h)")
+	cmd.Flags().StringVar(&mode, "mode", "quick", "scan mode: quick or full")
+
+	return cmd
+}
+
+func runScheduleEnable(intervalStr, mode string) error {
+	dur, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		return fmt.Errorf("invalid interval %q: %w", intervalStr, err)
+	}
+
+	backend := schedule.DetectBackend()
+
+	binaryPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("determine binary path: %w", err)
+	}
+
+	cfg := schedule.Config{
+		Interval:   dur,
+		ScanMode:   mode,
+		Backend:    backend,
+		BinaryPath: binaryPath,
+	}
+
+	if err := schedule.Enable(cfg); err != nil {
+		return fmt.Errorf("enable schedule: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Scheduled %s scan every %s via %s\n", mode, intervalStr, backend)
+	return nil
+}
+
+func newScheduleDisableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disable",
+		Short: "Disable scheduled scanning",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScheduleDisable()
+		},
+	}
+}
+
+func runScheduleDisable() error {
+	if err := schedule.Disable(); err != nil {
+		return fmt.Errorf("disable schedule: %w", err)
+	}
+	fmt.Fprintln(os.Stdout, "Scheduled scanning disabled")
+	return nil
+}
+
+func newScheduleStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show scheduled scan status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScheduleStatus()
+		},
+	}
+}
+
+func runScheduleStatus() error {
+	st := schedule.GetStatus()
+	if !st.Enabled {
+		fmt.Fprintln(os.Stdout, "Scheduled scanning: disabled")
+		return nil
+	}
+	fmt.Fprintf(os.Stdout, "Scheduled scanning: enabled\n")
+	fmt.Fprintf(os.Stdout, "  Backend:  %s\n", st.Backend)
+	fmt.Fprintf(os.Stdout, "  Interval: %s\n", st.Interval)
 	return nil
 }
