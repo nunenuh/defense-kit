@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/baseline"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
@@ -44,6 +46,7 @@ audit, harden, and monitor your Linux systems.`,
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 
 	root.AddCommand(newScanCmd())
+	root.AddCommand(newHardenCmd())
 	root.AddCommand(newBaselineCmd())
 	root.AddCommand(newToolsCmd())
 
@@ -231,6 +234,178 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 	}
 
 	return nil
+}
+
+func newHardenCmd() *cobra.Command {
+	var (
+		dryRun bool
+		mode   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "harden",
+		Short: "Fix security issues found by scan (requires approval)",
+		Long: `Harden runs a full scan, then offers to remediate fixable findings.
+
+By default the command runs in dry-run mode: it shows what would be fixed
+without making any changes. Use --mode to select a different approval mode.
+
+Approval modes:
+  dry-run     (default) Preview fixes only — no changes applied
+  interactive Prompt for approval before each individual fix
+  batch       Prompt once to approve all fixes together
+  auto-low    Auto-approve LOW severity fixes; skip HIGH and CRITICAL`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runHarden(cfgFile, dryRun, mode)
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show fixes without applying (overrides --mode)")
+	cmd.Flags().StringVar(&mode, "mode", "dry-run", "approval mode: interactive, batch, auto-low, dry-run")
+
+	return cmd
+}
+
+// parseApprovalMode converts a mode string to a hardener.ApprovalMode.
+func parseApprovalMode(s string) hardener.ApprovalMode {
+	switch strings.ToLower(strings.ReplaceAll(s, "_", "-")) {
+	case "interactive":
+		return hardener.ModeInteractive
+	case "batch":
+		return hardener.ModeBatch
+	case "auto-low", "autolow":
+		return hardener.ModeAutoLow
+	default:
+		return hardener.ModeDryRun
+	}
+}
+
+func runHarden(cfgPath string, dryRun bool, modeStr string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Parse timeout from config.
+	timeout, err := time.ParseDuration(cfg.Scan.Timeout)
+	if err != nil {
+		timeout = 60 * time.Second
+	}
+
+	// Build scanner options (same as runScan).
+	toolRunner := tools.NewRunner()
+	scanOpts := scanner.ScanOptions{
+		ExcludePaths: cfg.Scan.ExcludePaths,
+		Timeout:      timeout,
+		Concurrency:  cfg.Scan.Concurrency,
+		UseExtTools:  cfg.Tools.PreferExternal,
+		Verbose:      verbose,
+		ToolRunner:   toolRunner,
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	// Run scan to collect findings.
+	fmt.Fprintln(os.Stdout, "Running scan to identify fixable findings...")
+	reg := defaultRegistry()
+	scanEngine := scanner.NewEngine(reg)
+	results := scanEngine.Run(ctx, scanOpts)
+
+	// Collect all findings.
+	var allFindings []scanner.Finding
+	for _, r := range results {
+		allFindings = append(allFindings, r.Findings...)
+	}
+	fmt.Fprintf(os.Stdout, "Scan complete: %d finding(s) found.\n\n", len(allFindings))
+
+	// Build hardener registry.
+	hardenReg := hardener.NewHardenerRegistry()
+	hardenReg.Register(hardener.NewSSHHardener())
+	hardenReg.Register(hardener.NewOSHardener())
+	hardenReg.Register(hardener.NewFirewallHardener())
+	hardenReg.Register(hardener.NewGitHardener())
+
+	fixable := hardenReg.FixableFindings(allFindings)
+	fmt.Fprintf(os.Stdout, "Fixable findings: %d of %d\n\n", len(fixable), len(allFindings))
+
+	if len(fixable) == 0 {
+		fmt.Fprintln(os.Stdout, "Nothing to harden.")
+		return nil
+	}
+
+	// Resolve approval mode; --dry-run flag takes precedence.
+	approvalMode := parseApprovalMode(modeStr)
+	if dryRun {
+		approvalMode = hardener.ModeDryRun
+	}
+
+	outDir := outputsDir()
+	hardenEngine := hardener.NewEngine(hardenReg, outDir)
+
+	opts := hardener.HardenOptions{
+		Mode:      approvalMode,
+		OutputDir: outDir,
+		Findings:  allFindings,
+		DryRun:    dryRun || approvalMode == hardener.ModeDryRun,
+	}
+
+	fmt.Fprintf(os.Stdout, "Hardening mode: %s\n\n", approvalMode.String())
+
+	hardenResults, runErr := hardenEngine.Run(ctx, allFindings, opts)
+
+	// Print results summary.
+	applied := 0
+	skipped := 0
+	errored := 0
+	for _, hr := range hardenResults {
+		switch {
+		case hr.Error != "":
+			errored++
+		case hr.Applied:
+			applied++
+		default:
+			skipped++
+		}
+	}
+
+	fmt.Fprintln(os.Stdout, "--- Harden Results ---")
+	fmt.Fprintf(os.Stdout, "  Fixable:  %d\n", len(fixable))
+	fmt.Fprintf(os.Stdout, "  Applied:  %d\n", applied)
+	fmt.Fprintf(os.Stdout, "  Skipped:  %d\n", skipped)
+	fmt.Fprintf(os.Stdout, "  Errors:   %d\n", errored)
+	fmt.Fprintln(os.Stdout)
+
+	if opts.DryRun || approvalMode == hardener.ModeDryRun {
+		fmt.Fprintln(os.Stdout, "(Dry-run: no changes were applied)")
+		fmt.Fprintln(os.Stdout)
+		for _, hr := range hardenResults {
+			fmt.Fprintf(os.Stdout, "  [WOULD FIX] [%s] %s\n    Fix: %s\n",
+				hr.Finding.Severity.String(), hr.Finding.Title, hr.Plan.Description)
+		}
+	} else {
+		for _, hr := range hardenResults {
+			switch {
+			case hr.Error != "":
+				fmt.Fprintf(os.Stdout, "  [ERROR]   [%s] %s — %s\n",
+					hr.Finding.Severity.String(), hr.Finding.Title, hr.Error)
+			case hr.Applied:
+				fmt.Fprintf(os.Stdout, "  [FIXED]   [%s] %s\n",
+					hr.Finding.Severity.String(), hr.Finding.Title)
+			default:
+				fmt.Fprintf(os.Stdout, "  [SKIPPED] [%s] %s\n",
+					hr.Finding.Severity.String(), hr.Finding.Title)
+			}
+		}
+	}
+
+	// Print rollback script path if any fixes were applied.
+	if applied > 0 {
+		fmt.Fprintf(os.Stdout, "\nRollback scripts written to: %s\n",
+			filepath.Join(outDir, "rollback-*.sh"))
+	}
+
+	return runErr
 }
 
 func newBaselineCmd() *cobra.Command {
