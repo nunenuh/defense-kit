@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -49,6 +50,7 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newHardenCmd())
 	root.AddCommand(newBaselineCmd())
 	root.AddCommand(newToolsCmd())
+	root.AddCommand(newReportCmd())
 
 	return root
 }
@@ -92,13 +94,40 @@ func signalContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+// executableDir returns the directory containing the running binary.
+// Falls back to the current working directory on error.
+func executableDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(exe)
+}
+
+// parseSeverity converts a severity string to a scanner.Severity value.
+// Unrecognised strings default to SevLow.
+func parseSeverity(s string) scanner.Severity {
+	switch strings.ToLower(s) {
+	case "critical":
+		return scanner.SevCritical
+	case "high":
+		return scanner.SevHigh
+	case "medium":
+		return scanner.SevMedium
+	default:
+		return scanner.SevLow
+	}
+}
+
 func newScanCmd() *cobra.Command {
 	var (
-		quick       bool
-		diff        bool
-		category    string
-		output      string
-		concurrency int
+		quick        bool
+		diff         bool
+		category     string
+		output       string
+		concurrency  int
+		htmlPath     string
+		alertEnabled bool
 	)
 
 	cmd := &cobra.Command{
@@ -108,7 +137,7 @@ func newScanCmd() *cobra.Command {
 It checks for security misconfigurations, vulnerability indicators,
 and deviations from a known baseline.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runScan(cfgFile, quick, diff, category, output, concurrency)
+			return runScan(cfgFile, quick, diff, category, output, concurrency, htmlPath, alertEnabled)
 		},
 	}
 
@@ -117,11 +146,13 @@ and deviations from a known baseline.`,
 	cmd.Flags().StringVar(&category, "category", "", "limit scan to a specific category (e.g. network, files, users)")
 	cmd.Flags().StringVarP(&output, "output", "o", "text", "output format: text, json, yaml")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "number of concurrent scan workers")
+	cmd.Flags().StringVar(&htmlPath, "html", "", "path to write HTML report (e.g. report.html)")
+	cmd.Flags().BoolVar(&alertEnabled, "alert", false, "send alerts via configured channels after scan")
 
 	return cmd
 }
 
-func runScan(cfgPath string, quick, diff bool, category, output string, concurrency int) error {
+func runScan(cfgPath string, quick, diff bool, category, output string, concurrency int, htmlPath string, alertEnabled bool) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -182,6 +213,48 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 		fmt.Fprintf(os.Stderr, "warning: could not save JSON report: %v\n", err)
 	} else {
 		fmt.Fprintf(os.Stdout, "Report saved: %s\n", jsonRep.OutputPath(scanID))
+	}
+
+	// Generate HTML report if requested.
+	if htmlPath != "" {
+		// Probe template paths: working directory first, then relative to binary.
+		templatePath := "templates/report.html"
+		if _, statErr := os.Stat(templatePath); os.IsNotExist(statErr) {
+			templatePath = filepath.Join(executableDir(), "..", "templates", "report.html")
+		}
+		hr := reporter.NewHTMLReporter(templatePath)
+		if genErr := hr.Generate(results, host, htmlPath); genErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: HTML report failed: %v\n", genErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "HTML report: %s\n", htmlPath)
+		}
+	}
+
+	// Send alerts if requested.
+	if alertEnabled {
+		cfg2, cfgErr := config.Load(cfgPath)
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not load config for alerts: %v\n", cfgErr)
+		} else {
+			dispatcher := reporter.NewAlertDispatcher()
+
+			if cfg2.Alerts.Slack.WebhookURL != "" {
+				minSev := parseSeverity(cfg2.Alerts.Slack.MinSeverity)
+				dispatcher.Add(reporter.NewSlackAlerter(cfg2.Alerts.Slack.WebhookURL), minSev)
+			}
+			if cfg2.Alerts.Webhook.URL != "" {
+				minSev := parseSeverity(cfg2.Alerts.Webhook.MinSeverity)
+				dispatcher.Add(reporter.NewWebhookAlerter(cfg2.Alerts.Webhook.URL, cfg2.Alerts.Webhook.HMACSecret, cfg2.Alerts.Webhook.RequireTLS), minSev)
+			}
+			if cfg2.Alerts.Email.To != "" {
+				minSev := parseSeverity(cfg2.Alerts.Email.MinSeverity)
+				dispatcher.Add(reporter.NewEmailAlerter(cfg2.Alerts.Email.To, "defense-kit@localhost", cfg2.Alerts.Email.SMTPHost, "25"), minSev)
+			}
+
+			if dispErr := dispatcher.Dispatch(ctx, results, host, scanID); dispErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: alert dispatch: %v\n", dispErr)
+			}
+		}
 	}
 
 	// Load existing baseline.
@@ -660,5 +733,87 @@ func runToolsCheck() error {
 	}
 	fmt.Fprintf(os.Stdout, "\n%d of %d external tools installed.\n", installed, len(statuses))
 
+	return nil
+}
+
+// newReportCmd returns the "report" parent command.
+func newReportCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "report",
+		Short: "Generate reports from last scan",
+		Long:  `report generates formatted output from a previously saved scan result.`,
+	}
+
+	cmd.AddCommand(newReportHTMLCmd())
+
+	return cmd
+}
+
+// newReportHTMLCmd returns the "report html <output-path>" subcommand.
+func newReportHTMLCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "html [output-path]",
+		Short: "Generate HTML report from last scan",
+		Long: `Generate a self-contained HTML report from the most recent scan saved in
+the outputs directory (~/.defense-kit/outputs).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReportHTML(args[0])
+		},
+	}
+}
+
+// runReportHTML loads the latest JSON scan report and generates an HTML file.
+func runReportHTML(outputPath string) error {
+	outDir := outputsDir()
+
+	// Find the most-recently-modified findings.json under outDir.
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return fmt.Errorf("report html: read outputs dir %q: %w", outDir, err)
+	}
+
+	// ReadDir returns entries sorted by name; scan IDs are time-stamped so
+	// the last entry is the most recent.
+	var latestJSON string
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(outDir, e.Name(), "findings.json")
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			latestJSON = candidate
+			break
+		}
+	}
+
+	if latestJSON == "" {
+		return fmt.Errorf("report html: no scan reports found in %s — run 'defense-kit scan' first", outDir)
+	}
+
+	// Parse the JSON report.
+	data, err := os.ReadFile(latestJSON)
+	if err != nil {
+		return fmt.Errorf("report html: read %q: %w", latestJSON, err)
+	}
+
+	var scanReport reporter.ScanReport
+	if err := json.Unmarshal(data, &scanReport); err != nil {
+		return fmt.Errorf("report html: parse %q: %w", latestJSON, err)
+	}
+
+	// Resolve template path.
+	templatePath := "templates/report.html"
+	if _, statErr := os.Stat(templatePath); os.IsNotExist(statErr) {
+		templatePath = filepath.Join(executableDir(), "..", "templates", "report.html")
+	}
+
+	hr := reporter.NewHTMLReporter(templatePath)
+	if err := hr.Generate(scanReport.Results, scanReport.Host, outputPath); err != nil {
+		return fmt.Errorf("report html: generate: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "HTML report written to: %s\n", outputPath)
 	return nil
 }
