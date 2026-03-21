@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
 const (
@@ -87,14 +88,14 @@ func (s *CredentialsScanner) Name() string           { return "credentials" }
 func (s *CredentialsScanner) Category() string       { return "code" }
 func (s *CredentialsScanner) RequiresRoot() bool     { return false }
 func (s *CredentialsScanner) RequiredTools() []string { return nil }
-func (s *CredentialsScanner) OptionalTools() []string { return nil }
+func (s *CredentialsScanner) OptionalTools() []string { return []string{"gitleaks", "trufflehog"} }
 func (s *CredentialsScanner) Available() bool        { return true }
 func (s *CredentialsScanner) Description() string {
 	return "Scans files for leaked credentials including AWS keys, private keys, API tokens, and hardcoded passwords."
 }
 
 // Scan searches target paths for credential patterns.
-func (s *CredentialsScanner) Scan(_ context.Context, opts scanner.ScanOptions) ([]scanner.Finding, error) {
+func (s *CredentialsScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]scanner.Finding, error) {
 	roots := opts.TargetPaths
 	if len(roots) == 0 {
 		home, err := os.UserHomeDir()
@@ -103,6 +104,38 @@ func (s *CredentialsScanner) Scan(_ context.Context, opts scanner.ScanOptions) (
 		}
 	}
 
+	// Track findings by ID for deduplication.
+	seenIDs := make(map[string]bool)
+	var findings []scanner.Finding
+
+	addFindings := func(ff []scanner.Finding) {
+		for _, f := range ff {
+			if !seenIDs[f.ID] {
+				seenIDs[f.ID] = true
+				findings = append(findings, f)
+			}
+		}
+	}
+
+	// Try gitleaks first if ToolRunner is available.
+	if opts.ToolRunner != nil && opts.ToolRunner.Available("gitleaks") {
+		for _, root := range roots {
+			out, err := opts.ToolRunner.Run(ctx, "gitleaks", []string{
+				"detect", "--source", root,
+				"--report-format", "json",
+				"--no-git",
+				"--exit-code", "0",
+			})
+			if err == nil || len(out) > 0 {
+				gitleaksFindings, parseErr := tools.ParseGitleaksJSON(out)
+				if parseErr == nil {
+					addFindings(gitleaksFindings)
+				}
+			}
+		}
+	}
+
+	// Always run native checks too.
 	seen := make(map[string]struct{})
 	var paths []string
 
@@ -132,14 +165,13 @@ func (s *CredentialsScanner) Scan(_ context.Context, opts scanner.ScanOptions) (
 		})
 	}
 
-	var findings []scanner.Finding
 	for _, path := range paths {
 		ff, err := scanFileForCredentials(path)
 		if err != nil {
 			// Unreadable or skipped — continue silently.
 			continue
 		}
-		findings = append(findings, ff...)
+		addFindings(ff)
 	}
 	return findings, nil
 }

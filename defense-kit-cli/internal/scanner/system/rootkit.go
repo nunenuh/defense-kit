@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
 // standardDevices is the set of device node names that are expected in /dev/.
@@ -73,29 +74,54 @@ func (s *RootkitScanner) Name() string            { return "rootkit" }
 func (s *RootkitScanner) Category() string        { return "system" }
 func (s *RootkitScanner) RequiresRoot() bool      { return true }
 func (s *RootkitScanner) RequiredTools() []string { return nil }
-func (s *RootkitScanner) OptionalTools() []string { return nil }
+func (s *RootkitScanner) OptionalTools() []string { return []string{"rkhunter", "chkrootkit"} }
 func (s *RootkitScanner) Available() bool         { return true }
 func (s *RootkitScanner) Description() string {
 	return "Checks for rootkit indicators: suspicious kernel module names in /proc/modules, non-standard device files in /dev, and processes whose /proc/*/status PID count differs from the number of /proc/[0-9]* entries."
 }
 
 // Scan runs all rootkit detection checks and returns the findings.
-func (s *RootkitScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scanner.Finding, error) {
+func (s *RootkitScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]scanner.Finding, error) {
+	// Track findings by ID for deduplication.
+	seenIDs := make(map[string]bool)
 	var findings []scanner.Finding
 
+	addFindings := func(ff []scanner.Finding) {
+		for _, f := range ff {
+			if !seenIDs[f.ID] {
+				seenIDs[f.ID] = true
+				findings = append(findings, f)
+			}
+		}
+	}
+
+	// Try rkhunter if ToolRunner is available.
+	if opts.ToolRunner != nil && opts.ToolRunner.Available("rkhunter") {
+		out, err := opts.ToolRunner.Run(ctx, "rkhunter", []string{
+			"--check", "--skip-keypress", "--report-warnings-only",
+		})
+		if err == nil || len(out) > 0 {
+			rkhunterFindings, parseErr := tools.ParseRkhunterOutput(out)
+			if parseErr == nil {
+				addFindings(rkhunterFindings)
+			}
+		}
+	}
+
+	// Always run native checks too.
 	moduleFindings, err := s.checkKernelModules()
 	if err == nil {
-		findings = append(findings, moduleFindings...)
+		addFindings(moduleFindings)
 	}
 
 	devFindings, err := s.checkDevFiles()
 	if err == nil {
-		findings = append(findings, devFindings...)
+		addFindings(devFindings)
 	}
 
 	hiddenFindings, err := s.checkHiddenProcesses()
 	if err == nil {
-		findings = append(findings, hiddenFindings...)
+		addFindings(hiddenFindings)
 	}
 
 	return findings, nil

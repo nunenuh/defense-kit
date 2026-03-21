@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
 const sshdConfigPath = "/etc/ssh/sshd_config"
@@ -56,33 +57,59 @@ func (s *SSHScanner) Name() string            { return "ssh" }
 func (s *SSHScanner) Category() string        { return "auth" }
 func (s *SSHScanner) RequiresRoot() bool      { return true }
 func (s *SSHScanner) RequiredTools() []string { return nil }
-func (s *SSHScanner) OptionalTools() []string { return nil }
+func (s *SSHScanner) OptionalTools() []string { return []string{"ssh-audit"} }
 func (s *SSHScanner) Available() bool         { return true }
 func (s *SSHScanner) Description() string {
 	return "Checks /etc/ssh/sshd_config for weak settings (PermitRootLogin, PasswordAuthentication, MaxAuthTries, PermitEmptyPasswords) and authorized_keys files for world-readable permissions."
 }
 
 // Scan runs all SSH checks and returns the collected findings.
-func (s *SSHScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scanner.Finding, error) {
+func (s *SSHScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]scanner.Finding, error) {
+	// Track findings by ID for deduplication.
+	seenIDs := make(map[string]bool)
 	var findings []scanner.Finding
 
+	addFindings := func(ff []scanner.Finding) {
+		for _, f := range ff {
+			if !seenIDs[f.ID] {
+				seenIDs[f.ID] = true
+				findings = append(findings, f)
+			}
+		}
+	}
+
+	// Try ssh-audit if ToolRunner is available.
+	if opts.ToolRunner != nil && opts.ToolRunner.Available("ssh-audit") {
+		out, err := opts.ToolRunner.Run(ctx, "ssh-audit", []string{"--json", "localhost"})
+		if err == nil || len(out) > 0 {
+			auditFindings, parseErr := tools.ParseSSHAuditJSON(out)
+			if parseErr == nil {
+				addFindings(auditFindings)
+			}
+		}
+	}
+
+	// Always run native config checks too.
 	configFindings, err := s.checkSshdConfig(s.configPath)
 	if err != nil {
 		// Non-fatal: report as a single finding if the file is unreadable.
-		findings = append(findings, scanner.Finding{
+		f := scanner.Finding{
 			ID:       scanner.GenerateFindingID(s.Name(), s.configPath, "sshd_config unreadable"),
 			Scanner:  s.Name(),
 			Severity: scanner.SevHigh,
 			Title:    "sshd_config could not be read",
 			Detail:   fmt.Sprintf("Failed to open %s: %v", s.configPath, err),
 			Location: s.configPath,
-		})
+		}
+		if !seenIDs[f.ID] {
+			seenIDs[f.ID] = true
+			findings = append(findings, f)
+		}
 	} else {
-		findings = append(findings, configFindings...)
+		addFindings(configFindings)
 	}
 
-	keyFindings := s.checkAuthorizedKeys()
-	findings = append(findings, keyFindings...)
+	addFindings(s.checkAuthorizedKeys())
 
 	return findings, nil
 }

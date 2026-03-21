@@ -36,8 +36,9 @@ func TestCredentialsScanner_Interface(t *testing.T) {
 	if s.RequiredTools() != nil {
 		t.Error("RequiredTools() should be nil")
 	}
-	if s.OptionalTools() != nil {
-		t.Error("OptionalTools() should be nil")
+	// OptionalTools now returns gitleaks and trufflehog.
+	if len(s.OptionalTools()) == 0 {
+		t.Error("OptionalTools() should advertise external tools")
 	}
 
 	// Verify it satisfies the scanner.Scanner interface at compile time.

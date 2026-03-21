@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+// ToolRunner allows scanners to call external tools.
+type ToolRunner interface {
+	Run(ctx context.Context, tool string, args []string) ([]byte, error)
+	Available(tool string) bool
+}
+
 // Severity represents the severity level of a finding.
 type Severity int
 
@@ -92,6 +98,7 @@ type ScanOptions struct {
 	Quick            bool
 	Diff             bool
 	Verbose          bool
+	ToolRunner       ToolRunner
 }
 
 // Scanner is the interface that all defensive security scanners must implement.
