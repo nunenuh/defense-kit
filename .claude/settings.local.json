@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh search:*)",
+      "mcp__exa__web_search_exa",
+      "Bash(gh api:*)",
+      "Bash(go mod:*)",
+      "Bash(go get:*)",
+      "Bash(make build:*)",
+      "Bash(make lint:*)",
+      "Bash(cd:*)",
+      "Bash(go test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(./bin/defense-kit tools:*)",
+      "Bash(./bin/defense-kit scan:*)",
+      "Bash(./bin/defense-kit harden:*)",
+      "Bash(timeout 90 /workspace/company/nunenuh/defense-kit/defense-kit-cli/bin/defense-kit harden --dry-run)",
+      "Bash(./bin/defense-kit schedule:*)"
+    ]
+  }
+}
