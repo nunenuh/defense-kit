@@ -2,12 +2,22 @@
 
 Defensive security toolkit for Claude Code.
 
+## v2 Architecture (Hybrid)
+
+- **Go binary on HOST** — OS, kernel, process, network, and SSH scans (requires real system access)
+- **Docker container** — isolated code, dependency, container, and secret scanning
+
 ## Setup
 
 ```bash
-docker compose build
-TARGET_PATH=/path/to/code docker compose up -d
-docker compose exec defense-kit bash
+# Build Go binary and Docker image
+make docker-build
+
+# Start container (set TARGET_PATH to the code you want to scan)
+TARGET_PATH=/path/to/code make docker-up
+
+# Open a shell in the container
+docker compose -f docker/docker-compose.yml exec defense-kit bash
 ```
 
 ## Usage
@@ -16,6 +26,16 @@ docker compose exec defense-kit bash
 - `/defense-kit harden` — fix issues with approval
 - `/defense-kit monitor` — watch for changes
 - `/defense-kit comply` — compliance report
+
+### Make Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build Go binary |
+| `make docker-build` | Build Go binary then Docker image |
+| `make docker-up` | Start container (requires TARGET_PATH) |
+| `make docker-scan` | Run scan inside running container |
+| `make docker-down` | Stop container |
 
 ## Rules
 
