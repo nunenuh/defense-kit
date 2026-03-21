@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Defense-Kit Security Report — {{.Host}}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    a { color: #58a6ff; }
+
+    /* ── Layout ── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+
+    /* ── Header ── */
+    header {
+      border-bottom: 1px solid #21262d;
+      padding-bottom: 20px;
+      margin-bottom: 20px;
+    }
+    header h1 { font-size: 22px; color: #e6edf3; }
+    header .meta { color: #8b949e; font-size: 12px; margin-top: 4px; }
+
+    /* ── Warning banner ── */
+    .warning-banner {
+      background: #3d1c02;
+      border: 1px solid #d29922;
+      border-radius: 6px;
+      color: #e3b341;
+      font-weight: 600;
+      padding: 10px 16px;
+      margin-bottom: 24px;
+    }
+    .warning-banner span { margin-right: 8px; }
+
+    /* ── Summary bar ── */
+    .summary-bar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+    .sev-card {
+      flex: 1 1 120px;
+      border-radius: 8px;
+      padding: 14px 18px;
+      text-align: center;
+      border: 1px solid transparent;
+    }
+    .sev-card .count { font-size: 32px; font-weight: 700; }
+    .sev-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+
+    .sev-card.critical { background: #2d0d0d; border-color: #da3633; color: #ff7b72; }
+    .sev-card.high     { background: #2d1700; border-color: #d18616; color: #ffa657; }
+    .sev-card.medium   { background: #2d2200; border-color: #9e6a03; color: #e3b341; }
+    .sev-card.low      { background: #00262d; border-color: #1f6feb; color: #79c0ff; }
+    .sev-card.total    { background: #161b22; border-color: #30363d; color: #c9d1d9; }
+
+    /* ── Section headings ── */
+    h2 {
+      font-size: 16px;
+      color: #e6edf3;
+      margin-bottom: 14px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #21262d;
+    }
+
+    /* ── Findings table ── */
+    .findings-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 32px;
+      font-size: 13px;
+    }
+    .findings-table th {
+      background: #161b22;
+      color: #8b949e;
+      font-weight: 600;
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 2px solid #21262d;
+      white-space: nowrap;
+    }
+    .findings-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #21262d;
+      vertical-align: top;
+    }
+    .findings-table tr:hover td { background: #161b22; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .badge.CRITICAL { background: #da3633; color: #fff; }
+    .badge.HIGH     { background: #d18616; color: #fff; }
+    .badge.MEDIUM   { background: #9e6a03; color: #fff; }
+    .badge.LOW      { background: #1f6feb; color: #fff; }
+
+    .finding-title { font-weight: 600; color: #e6edf3; }
+    .finding-scanner { color: #8b949e; font-size: 12px; }
+    .finding-location { font-family: 'Courier New', monospace; font-size: 12px; color: #8b949e; }
+
+    pre.evidence {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #c9d1d9;
+      max-width: 320px;
+    }
+
+    .remediation { color: #7ee787; font-size: 12px; }
+
+    /* ── No findings ── */
+    .no-findings {
+      color: #7ee787;
+      font-style: italic;
+      padding: 16px 0;
+    }
+
+    /* ── Scanner status table ── */
+    .scanner-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-bottom: 32px;
+    }
+    .scanner-table th {
+      background: #161b22;
+      color: #8b949e;
+      font-weight: 600;
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 2px solid #21262d;
+    }
+    .scanner-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #21262d;
+    }
+    .status-success { color: #7ee787; }
+    .status-partial  { color: #e3b341; }
+    .status-failed   { color: #ff7b72; }
+    .status-skipped  { color: #8b949e; }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid #21262d;
+      padding-top: 14px;
+      color: #8b949e;
+      font-size: 11px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <h1>Defense-Kit Security Report</h1>
+    <div class="meta">
+      Host: <strong>{{.Host}}</strong> &nbsp;|&nbsp;
+      Scan ID: <strong>{{.ScanID}}</strong> &nbsp;|&nbsp;
+      Generated: <strong>{{.Time}}</strong>
+    </div>
+  </header>
+
+  <!-- Warning banner -->
+  <div class="warning-banner">
+    <span>&#9888;</span>
+    Contains security findings — do not share publicly. Treat this report as confidential.
+  </div>
+
+  <!-- Summary bar -->
+  <div class="summary-bar">
+    <div class="sev-card critical">
+      <div class="count">{{.Summary.Critical}}</div>
+      <div class="label">Critical</div>
+    </div>
+    <div class="sev-card high">
+      <div class="count">{{.Summary.High}}</div>
+      <div class="label">High</div>
+    </div>
+    <div class="sev-card medium">
+      <div class="count">{{.Summary.Medium}}</div>
+      <div class="label">Medium</div>
+    </div>
+    <div class="sev-card low">
+      <div class="count">{{.Summary.Low}}</div>
+      <div class="label">Low</div>
+    </div>
+    <div class="sev-card total">
+      <div class="count">{{.Summary.Total}}</div>
+      <div class="label">Total</div>
+    </div>
+  </div>
+
+  <!-- Findings table -->
+  <h2>Findings</h2>
+  {{if .Findings}}
+  <table class="findings-table">
+    <thead>
+      <tr>
+        <th>Severity</th>
+        <th>Title / Scanner</th>
+        <th>Location</th>
+        <th>Evidence</th>
+        <th>Remediation</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Findings}}
+      <tr>
+        <td><span class="badge {{.Severity}}">{{.Severity}}</span></td>
+        <td>
+          <div class="finding-title">{{.Title}}</div>
+          <div class="finding-scanner">{{.Scanner}}</div>
+        </td>
+        <td><span class="finding-location">{{.Location}}</span></td>
+        <td><pre class="evidence">{{.Evidence}}</pre></td>
+        <td><span class="remediation">{{.Remediation}}</span></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="no-findings">No findings — system appears clean.</p>
+  {{end}}
+
+  <!-- Scanner status -->
+  <h2>Scanner Status</h2>
+  <table class="scanner-table">
+    <thead>
+      <tr>
+        <th>Scanner</th>
+        <th>Status</th>
+        <th>Duration</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Scanners}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td><span class="status-{{.Status}}">{{.Status}}</span></td>
+        <td>{{.Duration}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  <footer>
+    Generated by Defense-Kit &mdash; Confidential Security Report
+  </footer>
+
+</div>
+</body>
+</html>
