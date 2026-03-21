@@ -1,0 +1,305 @@
+package filesystem_test
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner/filesystem"
+)
+
+// ---------------------------------------------------------------------------
+// IntegrityScanner
+// ---------------------------------------------------------------------------
+
+func TestIntegrityScanner_Interface(t *testing.T) {
+	s := filesystem.NewIntegrityScanner()
+
+	if s.Name() != "file_integrity" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "file_integrity")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if !s.RequiresRoot() {
+		t.Error("RequiresRoot() should be true")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should return nil")
+	}
+	if s.OptionalTools() != nil {
+		t.Error("OptionalTools() should return nil")
+	}
+}
+
+// TestIntegrityScanner_DetectsSUIDBinary creates a temp directory containing a
+// fake binary with the SUID bit set (0o4755) and verifies that IntegrityScanner
+// reports it as a HIGH finding.
+func TestIntegrityScanner_DetectsSUIDBinary(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a fake binary with SUID bit set.
+	fakeBin := filepath.Join(dir, "evilbin")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to create fake binary: %v", err)
+	}
+	if err := os.Chmod(fakeBin, 0o4755); err != nil {
+		t.Fatalf("failed to set SUID bit: %v", err)
+	}
+
+	// Verify the SUID bit was actually set; some filesystems (e.g. overlayfs
+	// in Docker without --privileged) silently drop the setuid bit.
+	info, err := os.Lstat(fakeBin)
+	if err != nil {
+		t.Fatalf("os.Lstat failed: %v", err)
+	}
+	if info.Mode()&os.ModeSetuid == 0 {
+		t.Skip("setuid bit could not be set in this environment (likely a restricted filesystem); skipping test")
+	}
+
+	s := filesystem.NewIntegrityScanner()
+	opts := scanner.ScanOptions{
+		TargetPaths: []string{dir},
+	}
+
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for SUID binary, got none")
+	}
+
+	f := findings[0]
+	if f.ID == "" {
+		t.Error("finding has empty ID")
+	}
+	if f.Scanner != "file_integrity" {
+		t.Errorf("finding Scanner = %q, want %q", f.Scanner, "file_integrity")
+	}
+	if f.Severity != scanner.SevHigh {
+		t.Errorf("finding Severity = %v, want HIGH", f.Severity)
+	}
+	if f.Location == "" {
+		t.Error("finding has empty Location")
+	}
+	if f.Evidence == "" {
+		t.Error("finding has empty Evidence")
+	}
+}
+
+// TestIntegrityScanner_SkipsKnownSafeBinaries verifies that binaries in the
+// known-safe list (e.g., "sudo") do NOT produce findings even when they have
+// the SUID bit set.
+func TestIntegrityScanner_SkipsKnownSafeBinaries(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a fake "sudo" binary with SUID bit.
+	fakeSudo := filepath.Join(dir, "sudo")
+	if err := os.WriteFile(fakeSudo, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to create fake sudo: %v", err)
+	}
+	if err := os.Chmod(fakeSudo, 0o4755); err != nil {
+		t.Fatalf("failed to set SUID bit: %v", err)
+	}
+	// This test is valid whether or not the SUID bit was actually preserved:
+	// if the bit can't be set, there won't be a finding (correct); if it can
+	// be set, the known-safe list should suppress it (also correct).
+
+	s := filesystem.NewIntegrityScanner()
+	opts := scanner.ScanOptions{
+		TargetPaths: []string{dir},
+	}
+
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for known-safe binary, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestIntegrityScanner_NoFindingsForNormalBinary verifies that a binary with
+// standard permissions (0o755) does not produce any findings.
+func TestIntegrityScanner_NoFindingsForNormalBinary(t *testing.T) {
+	dir := t.TempDir()
+
+	normalBin := filepath.Join(dir, "normalbin")
+	if err := os.WriteFile(normalBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to create normal binary: %v", err)
+	}
+
+	s := filesystem.NewIntegrityScanner()
+	opts := scanner.ScanOptions{
+		TargetPaths: []string{dir},
+	}
+
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestIntegrityScanner_DetectsSGIDBinary verifies that a binary with only the
+// SGID bit set is also flagged.
+func TestIntegrityScanner_DetectsSGIDBinary(t *testing.T) {
+	dir := t.TempDir()
+
+	fakeBin := filepath.Join(dir, "sgidbin")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to create fake binary: %v", err)
+	}
+	if err := os.Chmod(fakeBin, 0o2755); err != nil {
+		t.Fatalf("failed to set SGID bit: %v", err)
+	}
+
+	// Verify the SGID bit was actually set; some filesystems silently drop it.
+	info, err := os.Lstat(fakeBin)
+	if err != nil {
+		t.Fatalf("os.Lstat failed: %v", err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("setgid bit could not be set in this environment (likely a restricted filesystem); skipping test")
+	}
+
+	s := filesystem.NewIntegrityScanner()
+	opts := scanner.ScanOptions{
+		TargetPaths: []string{dir},
+	}
+
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for SGID binary, got none")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stub scanners — interface tests
+// ---------------------------------------------------------------------------
+
+func TestAnomaliesScanner_Interface(t *testing.T) {
+	s := filesystem.NewAnomaliesScanner()
+
+	if s.Name() != "filesystem" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "filesystem")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Errorf("Scan returned unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+	}
+}
+
+func TestTimestompScanner_Interface(t *testing.T) {
+	s := filesystem.NewTimestompScanner()
+
+	if s.Name() != "timestomp" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "timestomp")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Errorf("Scan returned unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+	}
+}
+
+func TestCapabilitiesScanner_Interface(t *testing.T) {
+	s := filesystem.NewCapabilitiesScanner()
+
+	if s.Name() != "capabilities" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "capabilities")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Errorf("Scan returned unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+	}
+}
+
+func TestSwapScanner_Interface(t *testing.T) {
+	s := filesystem.NewSwapScanner()
+
+	if s.Name() != "swap" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "swap")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Errorf("Scan returned unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+	}
+}
