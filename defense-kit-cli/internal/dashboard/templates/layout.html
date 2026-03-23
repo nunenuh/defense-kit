@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>defense-kit — {{.Title}}</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="logo">defense-kit</div>
+        <a href="/" class="nav-item {{if eq .Active "home"}}active{{end}}">Overview</a>
+        <a href="/findings" class="nav-item {{if eq .Active "findings"}}active{{end}}">Findings</a>
+        <a href="/history" class="nav-item {{if eq .Active "history"}}active{{end}}">History</a>
+        <a href="/scanners" class="nav-item {{if eq .Active "scanners"}}active{{end}}">Scanners</a>
+    </nav>
+    <main class="content">
+        {{template "content" .}}
+    </main>
+    <script src="/static/js/htmx.min.js"></script>
+</body>
+</html>
