@@ -444,7 +444,7 @@ func TestCredentialsScanner_GitHistory_DetectsDeletedAWSKey(t *testing.T) {
 	if err := os.WriteFile(secretFile, []byte("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
 		t.Fatalf("failed to write secrets file: %v", err)
 	}
-	runGit("add", "secrets.env")
+	runGit("add", "-f", "secrets.env")
 	runGit("commit", "-m", "add secrets")
 
 	// Delete the file in a second commit.
