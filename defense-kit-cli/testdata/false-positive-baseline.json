@@ -1,0 +1,15 @@
+{
+    "description": "Expected findings on a freshly installed Ubuntu 22.04",
+    "expected_findings": [
+        {"scanner": "ssh", "title": "PasswordAuthentication enabled", "severity": "HIGH", "note": "Default Ubuntu SSH config"},
+        {"scanner": "sysctl", "title": "dmesg_restrict is 0", "severity": "MEDIUM", "note": "Default kernel param"},
+        {"scanner": "mac", "title": "No mandatory access control", "severity": "MEDIUM", "note": "AppArmor may be in complain mode"},
+        {"scanner": "updates", "title": "Pending security updates", "severity": "HIGH", "note": "Normal on non-auto-update systems"},
+        {"scanner": "auditd", "title": "auditd not running", "severity": "HIGH", "note": "Not installed by default"},
+        {"scanner": "firewall", "title": "No firewall active", "severity": "MEDIUM", "note": "UFW not enabled by default"}
+    ],
+    "should_NOT_find": [
+        "rootkit", "reverse shell", "cryptocurrency miner", "UID 0 backdoor",
+        "malicious cron", "LD_PRELOAD", "PAM backdoor"
+    ]
+}

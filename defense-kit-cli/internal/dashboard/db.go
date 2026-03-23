@@ -126,6 +126,21 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
+
+CREATE TABLE IF NOT EXISTS baselines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    finding_count INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS schedule_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled BOOLEAN DEFAULT FALSE,
+    interval TEXT DEFAULT '6h',
+    mode TEXT DEFAULT 'quick',
+    updated_at DATETIME NOT NULL
+);
 `
 	_, err := d.db.Exec(ddl)
 	return err
@@ -432,4 +447,77 @@ func (d *DB) MarkNotificationRead(id int) error {
 	const q = `UPDATE notifications SET read = TRUE WHERE id = ?`
 	_, err := d.db.Exec(q, id)
 	return err
+}
+
+// BaselineRecord holds info about the saved baseline scan.
+type BaselineRecord struct {
+	ID           int
+	ScanID       string
+	CreatedAt    time.Time
+	FindingCount int
+}
+
+// SaveBaseline inserts a new baseline record, replacing any previous one.
+func (d *DB) SaveBaseline(scanID string, findingCount int) error {
+	const q = `
+INSERT OR REPLACE INTO baselines (id, scan_id, created_at, finding_count)
+VALUES (1, ?, ?, ?)`
+	_, err := d.db.Exec(q, scanID, time.Now().UTC().Format(time.RFC3339), findingCount)
+	return err
+}
+
+// GetBaseline returns the current baseline record, if any.
+// Returns nil (no error) when no baseline has been set.
+func (d *DB) GetBaseline() (*BaselineRecord, error) {
+	const q = `SELECT id, scan_id, created_at, finding_count FROM baselines WHERE id = 1`
+	var b BaselineRecord
+	var ts string
+	err := d.db.QueryRow(q).Scan(&b.ID, &b.ScanID, &ts, &b.FindingCount)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t, _ := time.Parse(time.RFC3339, ts)
+	b.CreatedAt = t
+	return &b, nil
+}
+
+// ScheduleConfig holds the persisted schedule configuration.
+type ScheduleConfig struct {
+	Enabled   bool
+	Interval  string
+	Mode      string
+	UpdatedAt time.Time
+}
+
+// SaveScheduleConfig upserts the singleton schedule configuration row.
+func (d *DB) SaveScheduleConfig(cfg ScheduleConfig) error {
+	const q = `
+INSERT OR REPLACE INTO schedule_config (id, enabled, interval, mode, updated_at)
+VALUES (1, ?, ?, ?, ?)`
+	_, err := d.db.Exec(q, cfg.Enabled, cfg.Interval, cfg.Mode,
+		cfg.UpdatedAt.UTC().Format(time.RFC3339))
+	return err
+}
+
+// GetScheduleConfig returns the current schedule configuration.
+// Returns a default (disabled) config when none has been saved.
+func (d *DB) GetScheduleConfig() (ScheduleConfig, error) {
+	const q = `SELECT enabled, interval, mode, updated_at FROM schedule_config WHERE id = 1`
+	var cfg ScheduleConfig
+	var ts string
+	var enabledInt int
+	err := d.db.QueryRow(q).Scan(&enabledInt, &cfg.Interval, &cfg.Mode, &ts)
+	if err == sql.ErrNoRows {
+		return ScheduleConfig{Enabled: false, Interval: "6h", Mode: "quick"}, nil
+	}
+	if err != nil {
+		return ScheduleConfig{}, err
+	}
+	cfg.Enabled = enabledInt != 0
+	t, _ := time.Parse(time.RFC3339, ts)
+	cfg.UpdatedAt = t
+	return cfg, nil
 }

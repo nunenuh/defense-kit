@@ -1,0 +1,59 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Settings</h1>
+</div>
+
+<form id="settings-form" hx-post="/api/settings" hx-target="#save-status">
+    <div class="settings-section">
+        <h2>Scanner</h2>
+
+        <label for="concurrency">Concurrency</label>
+        <input type="number" id="concurrency" name="concurrency"
+               value="{{.Config.Concurrency}}" min="1" max="32">
+
+        <label for="timeout_seconds">Timeout (seconds)</label>
+        <input type="number" id="timeout_seconds" name="timeout_seconds"
+               value="{{.Config.TimeoutSeconds}}" min="5" max="600">
+    </div>
+
+    <div class="settings-section">
+        <h2>Paths</h2>
+
+        <label for="exclude_paths">Exclude Paths (one per line)</label>
+        <textarea id="exclude_paths" name="exclude_paths" rows="4">{{range .Config.ExcludePaths}}{{.}}
+{{end}}</textarea>
+    </div>
+
+    <div class="settings-section">
+        <h2>Alerts</h2>
+
+        <label for="alert_channels">Alert Channels (one per line)</label>
+        <textarea id="alert_channels" name="alert_channels" rows="4">{{range .Config.AlertChannels}}{{.}}
+{{end}}</textarea>
+    </div>
+
+    <div class="actions">
+        <button type="submit">Save Settings</button>
+        <span id="save-status"></span>
+    </div>
+</form>
+
+<script>
+// Convert form to JSON before submitting via htmx.
+document.getElementById('settings-form').addEventListener('htmx:configRequest', function(evt) {
+    const form = evt.target;
+    const excludePaths = form.exclude_paths.value
+        .split('\n').map(s => s.trim()).filter(s => s.length > 0);
+    const alertChannels = form.alert_channels.value
+        .split('\n').map(s => s.trim()).filter(s => s.length > 0);
+
+    evt.detail.parameters = {
+        concurrency:     parseInt(form.concurrency.value, 10) || 4,
+        timeout_seconds: parseInt(form.timeout_seconds.value, 10) || 60,
+        exclude_paths:   excludePaths,
+        alert_channels:  alertChannels,
+    };
+    evt.detail.headers['Content-Type'] = 'application/json';
+});
+</script>
+{{end}}

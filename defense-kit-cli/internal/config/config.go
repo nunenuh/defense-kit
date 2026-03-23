@@ -2,17 +2,34 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+// validSeverities is the set of recognised severity strings.
+var validSeverities = map[string]bool{
+	"critical": true,
+	"high":     true,
+	"medium":   true,
+	"low":      true,
+}
+
 // Config holds the full defense-kit configuration.
 type Config struct {
-	Scan    ScanConfig    `yaml:"scan"`
-	Tools   ToolsConfig   `yaml:"tools"`
-	Alerts  AlertsConfig  `yaml:"alerts"`
-	Monitor MonitorConfig `yaml:"monitor"`
+	Scan     ScanConfig               `yaml:"scan"`
+	Tools    ToolsConfig              `yaml:"tools"`
+	Alerts   AlertsConfig             `yaml:"alerts"`
+	Monitor  MonitorConfig            `yaml:"monitor"`
+	Profiles map[string]ProfileConfig `yaml:"profiles"`
+}
+
+// ProfileConfig defines a named scan profile with a set of categories.
+type ProfileConfig struct {
+	Categories []string `yaml:"categories"`
 }
 
 // ScanConfig controls scanning behaviour.
@@ -90,6 +107,11 @@ func Defaults() Config {
 				"shell_rc",
 			},
 		},
+		Profiles: map[string]ProfileConfig{
+			"workstation": {Categories: []string{"credentials", "ssh", "shell_rc", "env_vars", "processes", "cron", "browser", "git_hooks"}},
+			"server":      {Categories: []string{"ssh", "firewall", "users", "rootkit", "logs", "network", "persistence", "sysctl", "auditd"}},
+			"ci":          {Categories: []string{"credentials", "supply_chain", "containers", "git_hooks", "dependencies"}},
+		},
 	}
 }
 
@@ -110,4 +132,63 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// Validate checks the configuration for common mistakes and returns a list of
+// human-readable warning/error strings. An empty slice means the config is
+// valid.
+func (c Config) Validate() []string {
+	var warnings []string
+
+	// Scan.Concurrency
+	if c.Scan.Concurrency <= 0 || c.Scan.Concurrency > 64 {
+		warnings = append(warnings, fmt.Sprintf("scan.concurrency must be between 1 and 64 (got %d)", c.Scan.Concurrency))
+	}
+
+	// Scan.Timeout
+	if c.Scan.Timeout != "" {
+		if _, err := time.ParseDuration(c.Scan.Timeout); err != nil {
+			warnings = append(warnings, fmt.Sprintf("scan.timeout is not a valid duration %q: %v", c.Scan.Timeout, err))
+		}
+	}
+
+	// Scan.TimeoutHeavy
+	if c.Scan.TimeoutHeavy != "" {
+		if _, err := time.ParseDuration(c.Scan.TimeoutHeavy); err != nil {
+			warnings = append(warnings, fmt.Sprintf("scan.timeout_heavy is not a valid duration %q: %v", c.Scan.TimeoutHeavy, err))
+		}
+	}
+
+	// Severity fields
+	severityFields := map[string]string{
+		"alerts.slack.min_severity":   c.Alerts.Slack.MinSeverity,
+		"alerts.email.min_severity":   c.Alerts.Email.MinSeverity,
+		"alerts.webhook.min_severity": c.Alerts.Webhook.MinSeverity,
+	}
+	for field, val := range severityFields {
+		if val != "" && !validSeverities[strings.ToLower(val)] {
+			warnings = append(warnings, fmt.Sprintf("%s: unrecognised severity %q (valid: critical, high, medium, low)", field, val))
+		}
+	}
+
+	// Webhook URL
+	if c.Alerts.Webhook.URL != "" {
+		if !strings.HasPrefix(c.Alerts.Webhook.URL, "http://") && !strings.HasPrefix(c.Alerts.Webhook.URL, "https://") {
+			warnings = append(warnings, fmt.Sprintf("alerts.webhook.url must start with http:// or https:// (got %q)", c.Alerts.Webhook.URL))
+		}
+	}
+
+	// Slack webhook URL
+	if c.Alerts.Slack.WebhookURL != "" {
+		if !strings.HasPrefix(c.Alerts.Slack.WebhookURL, "http://") && !strings.HasPrefix(c.Alerts.Slack.WebhookURL, "https://") {
+			warnings = append(warnings, fmt.Sprintf("alerts.slack.webhook_url must start with http:// or https:// (got %q)", c.Alerts.Slack.WebhookURL))
+		}
+	}
+
+	// Email address
+	if c.Alerts.Email.To != "" && !strings.Contains(c.Alerts.Email.To, "@") {
+		warnings = append(warnings, fmt.Sprintf("alerts.email.to does not look like an email address (missing @): %q", c.Alerts.Email.To))
+	}
+
+	return warnings
 }
