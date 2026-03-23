@@ -12,7 +12,7 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner/system"
 )
 
-// defaultRegistry returns a Registry pre-populated with all 30 built-in scanners.
+// defaultRegistry returns a Registry pre-populated with all 37 built-in scanners.
 func defaultRegistry() *scanner.Registry {
 	r := scanner.NewRegistry()
 
@@ -38,6 +38,7 @@ func defaultRegistry() *scanner.Registry {
 	r.Register(filesystem.NewTimestompScanner())
 	r.Register(filesystem.NewCapabilitiesScanner())
 	r.Register(filesystem.NewSwapScanner())
+	r.Register(filesystem.NewEncryptionScanner())
 
 	// Network
 	r.Register(network.NewPortsScanner())
@@ -56,12 +57,18 @@ func defaultRegistry() *scanner.Registry {
 	r.Register(system.NewBootScanner())
 	r.Register(system.NewLogsScanner())
 	r.Register(system.NewPackageMgrScanner())
+	r.Register(system.NewSysctlScanner())
+	r.Register(system.NewServicesScanner())
+	r.Register(system.NewMACScanner())
+	r.Register(system.NewUpdatesScanner())
+	r.Register(system.NewAuditdScanner())
 
 	// Code
 	r.Register(code.NewCredentialsScanner())
 	r.Register(code.NewSupplyChainScanner())
 	r.Register(code.NewContainersScanner())
 	r.Register(code.NewGitHooksScanner())
+	r.Register(code.NewDockerRuntimeScanner())
 
 	return r
 }
