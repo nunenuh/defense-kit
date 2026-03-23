@@ -105,15 +105,13 @@ func TestBootScanner_Interface(t *testing.T) {
 	}
 }
 
-func TestBootScanner_StubReturnsNoFindings(t *testing.T) {
+func TestBootScanner_ScanDoesNotPanic(t *testing.T) {
 	s := system.NewBootScanner()
 	findings, err := s.Scan(context.Background(), defaultOpts())
 	if err != nil {
 		t.Fatalf("Scan returned error: %v", err)
 	}
-	if len(findings) != 0 {
-		t.Errorf("stub Scan should return 0 findings, got %d", len(findings))
-	}
+	_ = findings // real scanner may find issues, that's fine
 }
 
 // ---------------------------------------------------------------------------
