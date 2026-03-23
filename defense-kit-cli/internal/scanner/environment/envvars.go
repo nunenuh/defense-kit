@@ -1,9 +1,11 @@
 package environment
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
@@ -155,5 +157,145 @@ func (s *EnvVarsScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scann
 		}
 	}
 
+	// --- /etc/environment system-wide checks ---
+	findings = append(findings, checkEtcEnvironment("/etc/environment")...)
+
+	// --- /etc/profile.d/*.sh suspicious export checks ---
+	findings = append(findings, checkProfileD("/etc/profile.d")...)
+
 	return findings, nil
+}
+
+// checkEtcEnvironment reads /etc/environment and flags suspicious entries:
+// suspicious variable values and proxy settings pointing to non-localhost hosts.
+func checkEtcEnvironment(path string) []scanner.Finding {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var findings []scanner.Finding
+	lineNum := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lineNum++
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Lines in /etc/environment are KEY=value (no "export" prefix).
+		eqIdx := strings.IndexByte(line, '=')
+		if eqIdx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eqIdx])
+		val := strings.Trim(strings.TrimSpace(line[eqIdx+1:]), `"'`)
+		location := fmt.Sprintf("%s:%d", path, lineNum)
+
+		keyUpper := strings.ToUpper(key)
+
+		// Flag PATH with writable directories.
+		if keyUpper == "PATH" {
+			for _, entry := range strings.Split(val, ":") {
+				lower := strings.ToLower(entry)
+				if strings.Contains(lower, "/tmp") || strings.Contains(lower, "/dev/shm") {
+					findings = append(findings, scanner.Finding{
+						ID:          scanner.GenerateFindingID("env_vars", location, "PATH contains writable directory in /etc/environment"),
+						Scanner:     "env_vars",
+						Severity:    scanner.SevHigh,
+						Title:       "System-wide PATH contains writable directory",
+						Detail:      fmt.Sprintf("/etc/environment PATH entry %q points to a world-writable location, enabling system-wide binary hijacking.", entry),
+						Evidence:    line,
+						Location:    location,
+						Remediation: "Remove /tmp and /dev/shm entries from PATH in /etc/environment.",
+					})
+				}
+			}
+		}
+
+		// Flag LD_PRELOAD set system-wide.
+		if keyUpper == "LD_PRELOAD" && val != "" {
+			findings = append(findings, scanner.Finding{
+				ID:          scanner.GenerateFindingID("env_vars", location, "LD_PRELOAD in /etc/environment"),
+				Scanner:     "env_vars",
+				Severity:    scanner.SevCritical,
+				Title:       "LD_PRELOAD set in /etc/environment",
+				Detail:      "Setting LD_PRELOAD system-wide injects a shared library into every process on the system, which is a rootkit technique.",
+				Evidence:    line,
+				Location:    location,
+				Remediation: "Remove LD_PRELOAD from /etc/environment.",
+			})
+		}
+
+		// Flag non-localhost proxy settings.
+		if keyUpper == "HTTP_PROXY" || keyUpper == "HTTPS_PROXY" {
+			lower := strings.ToLower(val)
+			if val != "" && !strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.0.0.1") && !strings.Contains(lower, "::1") {
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID("env_vars", location, "non-localhost proxy in /etc/environment"),
+					Scanner:     "env_vars",
+					Severity:    scanner.SevMedium,
+					Title:       "System-wide non-localhost proxy configured in /etc/environment",
+					Detail:      fmt.Sprintf("%s is set to %q in /etc/environment, routing all system HTTP traffic through a remote proxy.", key, val),
+					Evidence:    line,
+					Location:    location,
+					Remediation: "Verify the proxy setting is intentional and the proxy server is trusted.",
+				})
+			}
+		}
+	}
+	return findings
+}
+
+// suspiciousExportTools are tools that indicate a suspicious export line in profile.d scripts.
+var suspiciousExportTools = []string{"curl", "wget", "eval"}
+
+// checkProfileD scans /etc/profile.d/*.sh for suspicious export lines.
+func checkProfileD(dir string) []scanner.Finding {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.sh"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+
+	var findings []scanner.Finding
+	for _, path := range matches {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		lineNum := 0
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			lineNum++
+			line := strings.TrimSpace(sc.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			// Only examine lines that are exports.
+			if !strings.HasPrefix(line, "export ") {
+				continue
+			}
+			lower := strings.ToLower(line)
+			for _, tool := range suspiciousExportTools {
+				if strings.Contains(lower, tool) {
+					location := fmt.Sprintf("%s:%d", path, lineNum)
+					findings = append(findings, scanner.Finding{
+						ID:          scanner.GenerateFindingID("env_vars", location, "suspicious export in profile.d"),
+						Scanner:     "env_vars",
+						Severity:    scanner.SevHigh,
+						Title:       "Suspicious export in /etc/profile.d script",
+						Detail:      fmt.Sprintf("An export line in %s contains %q, which may execute or download code when a new shell session starts.", path, tool),
+						Evidence:    line,
+						Location:    location,
+						Remediation: fmt.Sprintf("Review and remove the suspicious export from %s.", path),
+					})
+					break
+				}
+			}
+		}
+		f.Close()
+	}
+	return findings
 }
