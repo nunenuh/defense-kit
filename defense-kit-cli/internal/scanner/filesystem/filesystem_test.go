@@ -555,3 +555,105 @@ func TestSwapScanner_ScanDoesNotError(t *testing.T) {
 		t.Fatalf("Scan returned unexpected error: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// EncryptionScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestEncryptionScanner_Interface(t *testing.T) {
+	s := filesystem.NewEncryptionScanner()
+
+	if s.Name() != "encryption" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "encryption")
+	}
+	if s.Category() != "filesystem" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
+	}
+	if !s.RequiresRoot() {
+		t.Error("RequiresRoot() should be true")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should be nil")
+	}
+
+	var _ scanner.Scanner = s
+}
+
+func TestEncryptionScanner_DoesNotPanic(t *testing.T) {
+	s := filesystem.NewEncryptionScanner()
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+}
+
+// TestEncryptionScanner_DetectsUnencryptedRoot creates fake /proc/mounts
+// content with a plain /dev/sda1 root device and verifies a MEDIUM finding.
+func TestEncryptionScanner_DetectsUnencryptedRoot(t *testing.T) {
+	dir := t.TempDir()
+
+	mountsContent := "/dev/sda1 / ext4 rw,relatime 0 0\n"
+	mountsFile := filepath.Join(dir, "mounts")
+	if err := os.WriteFile(mountsFile, []byte(mountsContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	swapsFile := filepath.Join(dir, "swaps")
+	if err := os.WriteFile(swapsFile, []byte("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := filesystem.NewEncryptionScannerWithPaths(mountsFile, swapsFile, filepath.Join(dir, "sysblock"))
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "encryption" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for unencrypted root, got: %+v", findings)
+	}
+}
+
+// TestEncryptionScanner_NoFindingForDMCryptRoot verifies that a /dev/dm-0
+// root device produces no finding (dm devices are accepted as encrypted).
+func TestEncryptionScanner_NoFindingForDMCryptRoot(t *testing.T) {
+	dir := t.TempDir()
+
+	mountsContent := "/dev/dm-0 / ext4 rw,relatime 0 0\n"
+	mountsFile := filepath.Join(dir, "mounts")
+	if err := os.WriteFile(mountsFile, []byte(mountsContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	swapsFile := filepath.Join(dir, "swaps")
+	if err := os.WriteFile(swapsFile, []byte("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := filesystem.NewEncryptionScannerWithPaths(mountsFile, swapsFile, filepath.Join(dir, "sysblock"))
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Title == "Root filesystem does not appear to be encrypted" {
+			t.Errorf("unexpected root encryption finding for dm-crypt device: %+v", f)
+		}
+	}
+}
