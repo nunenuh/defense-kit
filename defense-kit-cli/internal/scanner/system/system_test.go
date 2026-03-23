@@ -2,6 +2,8 @@ package system_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
@@ -23,6 +25,11 @@ func verifyInterfaceCompliance() {
 	var _ scanner.Scanner = (*system.BootScanner)(nil)
 	var _ scanner.Scanner = (*system.LogsScanner)(nil)
 	var _ scanner.Scanner = (*system.PackageMgrScanner)(nil)
+	var _ scanner.Scanner = (*system.SysctlScanner)(nil)
+	var _ scanner.Scanner = (*system.ServicesScanner)(nil)
+	var _ scanner.Scanner = (*system.MACScanner)(nil)
+	var _ scanner.Scanner = (*system.UpdatesScanner)(nil)
+	var _ scanner.Scanner = (*system.AuditdScanner)(nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -193,5 +200,451 @@ func TestPackageMgrScanner_StubReturnsNoFindings(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Errorf("stub Scan should return 0 findings, got %d", len(findings))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SysctlScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestSysctlScanner_Interface(t *testing.T) {
+	s := system.NewSysctlScanner()
+
+	if got := s.Name(); got != "sysctl" {
+		t.Errorf("Name() = %q, want %q", got, "sysctl")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Errorf("RequiredTools() = %v, want nil", s.RequiredTools())
+	}
+}
+
+func TestSysctlScanner_DoesNotPanic(t *testing.T) {
+	s := system.NewSysctlScanner()
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Logf("Scan returned error (may be expected in test environment): %v", err)
+	}
+	for _, f := range findings {
+		if f.ID == "" {
+			t.Errorf("finding has empty ID: %+v", f)
+		}
+		if f.Scanner != "sysctl" {
+			t.Errorf("finding Scanner = %q, want sysctl", f.Scanner)
+		}
+		if f.Metadata["sysctl_param"] == "" {
+			t.Errorf("finding missing sysctl_param metadata: %+v", f)
+		}
+	}
+}
+
+// TestSysctlScanner_DetectsInsecureIPForward creates a fake /proc/sys tree
+// with ip_forward=1 and verifies that a HIGH finding is produced.
+func TestSysctlScanner_DetectsInsecureIPForward(t *testing.T) {
+	dir := t.TempDir()
+	paramPath := filepath.Join(dir, "net", "ipv4", "ip_forward")
+	if err := os.MkdirAll(filepath.Dir(paramPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(paramPath, []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := system.NewSysctlScannerWithPath(dir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Metadata["sysctl_param"] == "net.ipv4.ip_forward" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for ip_forward=1, got: %+v", findings)
+	}
+}
+
+// TestSysctlScanner_NoFindingForSecureValues verifies that when all params are
+// at their secure values no findings are produced.
+func TestSysctlScanner_NoFindingForSecureValues(t *testing.T) {
+	dir := t.TempDir()
+
+	secure := map[string]string{
+		"net/ipv4/ip_forward":                    "0",
+		"kernel/randomize_va_space":               "2",
+		"kernel/sysrq":                            "0",
+		"kernel/dmesg_restrict":                   "1",
+		"fs/suid_dumpable":                        "0",
+		"net/ipv4/conf/all/accept_redirects":       "0",
+		"net/ipv4/conf/all/send_redirects":         "0",
+		"net/ipv4/tcp_syncookies":                  "1",
+	}
+	for rel, val := range secure {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(val+"\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", path, err)
+		}
+	}
+
+	s := system.NewSysctlScannerWithPath(dir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for all-secure sysctl values, got %d: %+v", len(findings), findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ServicesScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestServicesScanner_Interface(t *testing.T) {
+	s := system.NewServicesScanner()
+
+	if got := s.Name(); got != "services" {
+		t.Errorf("Name() = %q, want %q", got, "services")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+}
+
+func TestServicesScanner_DoesNotPanic(t *testing.T) {
+	s := system.NewServicesScanner()
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Logf("Scan returned error (may be expected in test environment): %v", err)
+	}
+}
+
+// TestServicesScanner_DetectsInsecureService creates a fake /proc tree
+// containing a telnetd comm file and verifies a HIGH finding is produced.
+func TestServicesScanner_DetectsInsecureService(t *testing.T) {
+	dir := t.TempDir()
+	pidDir := filepath.Join(dir, "1234")
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("telnetd\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := system.NewServicesScannerWithPath(dir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Metadata["service_name"] == "telnetd" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for telnetd, got: %+v", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MACScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestMACScanner_Interface(t *testing.T) {
+	s := system.NewMACScanner()
+
+	if got := s.Name(); got != "mac" {
+		t.Errorf("Name() = %q, want %q", got, "mac")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+}
+
+func TestMACScanner_DoesNotPanic(t *testing.T) {
+	s := system.NewMACScanner()
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+}
+
+// TestMACScanner_DetectsNoMAC uses non-existent paths to simulate a system
+// where neither AppArmor nor SELinux is installed, expecting a MEDIUM finding.
+func TestMACScanner_DetectsNoMAC(t *testing.T) {
+	dir := t.TempDir()
+	s := system.NewMACScannerWithPaths(
+		filepath.Join(dir, "nonexistent_apparmor"),
+		filepath.Join(dir, "nonexistent_selinux"),
+	)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "mac" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for no MAC, got: %+v", findings)
+	}
+}
+
+// TestMACScanner_AppArmorEnabled creates a fake apparmor enabled file with
+// "Y" and verifies no "no MAC" finding is produced.
+func TestMACScanner_AppArmorEnabled(t *testing.T) {
+	dir := t.TempDir()
+	appArmorPath := filepath.Join(dir, "apparmor_enabled")
+	if err := os.WriteFile(appArmorPath, []byte("Y\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := system.NewMACScannerWithPaths(
+		appArmorPath,
+		filepath.Join(dir, "nonexistent_selinux"),
+	)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	// There should be no "no MAC" MEDIUM finding.
+	for _, f := range findings {
+		if f.Title == "No mandatory access control system is enabled" {
+			t.Errorf("unexpected 'no MAC' finding when AppArmor is enabled: %+v", f)
+		}
+	}
+}
+
+// TestMACScanner_SELinuxEnforcing creates a fake selinux enforce file with "1"
+// and verifies no "no MAC" finding is produced.
+func TestMACScanner_SELinuxEnforcing(t *testing.T) {
+	dir := t.TempDir()
+	selinuxPath := filepath.Join(dir, "selinux_enforce")
+	if err := os.WriteFile(selinuxPath, []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := system.NewMACScannerWithPaths(
+		filepath.Join(dir, "nonexistent_apparmor"),
+		selinuxPath,
+	)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Title == "No mandatory access control system is enabled" {
+			t.Errorf("unexpected 'no MAC' finding when SELinux is enforcing: %+v", f)
+		}
+	}
+}
+
+// TestMACScanner_SELinuxPermissive creates a fake selinux enforce file with "0"
+// and verifies a LOW finding is produced.
+func TestMACScanner_SELinuxPermissive(t *testing.T) {
+	dir := t.TempDir()
+	selinuxPath := filepath.Join(dir, "selinux_enforce")
+	if err := os.WriteFile(selinuxPath, []byte("0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := system.NewMACScannerWithPaths(
+		filepath.Join(dir, "nonexistent_apparmor"),
+		selinuxPath,
+	)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevLow && f.Scanner == "mac" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected LOW finding for SELinux permissive mode, got: %+v", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdatesScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestUpdatesScanner_Interface(t *testing.T) {
+	s := system.NewUpdatesScanner()
+
+	if got := s.Name(); got != "updates" {
+		t.Errorf("Name() = %q, want %q", got, "updates")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+}
+
+func TestUpdatesScanner_DoesNotPanic(t *testing.T) {
+	s := system.NewUpdatesScanner()
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+}
+
+// TestUpdatesScanner_DetectsMissingAutoUpgrades uses a path that does not
+// exist to simulate no unattended-upgrades config, expecting a MEDIUM finding.
+func TestUpdatesScanner_DetectsMissingAutoUpgrades(t *testing.T) {
+	dir := t.TempDir()
+	s := system.NewUpdatesScannerWithPaths(
+		filepath.Join(dir, "nonexistent"),
+		filepath.Join(dir, "pkgcache.bin"),
+	)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "updates" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for missing auto-upgrades, got: %+v", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AuditdScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestAuditdScanner_Interface(t *testing.T) {
+	s := system.NewAuditdScanner()
+
+	if got := s.Name(); got != "auditd" {
+		t.Errorf("Name() = %q, want %q", got, "auditd")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if !s.RequiresRoot() {
+		t.Error("RequiresRoot() should be true")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+}
+
+// TestAuditdScanner_DetectsNotRunning creates an empty fake /proc tree and
+// verifies a HIGH finding is produced for auditd not running.
+func TestAuditdScanner_DetectsNotRunning(t *testing.T) {
+	dir := t.TempDir()
+	s := system.NewAuditdScannerWithPath(dir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Scanner == "auditd" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for auditd not running, got: %+v", findings)
+	}
+}
+
+// TestAuditdScanner_RunningAuditd creates a fake /proc tree with an auditd
+// comm file and verifies no "not running" finding is produced.
+func TestAuditdScanner_RunningAuditd(t *testing.T) {
+	dir := t.TempDir()
+	pidDir := filepath.Join(dir, "999")
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("auditd\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := system.NewAuditdScannerWithPath(dir)
+	// No ToolRunner — so rule checks are skipped. We only verify no
+	// "auditd not running" finding appears.
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Title == "auditd is not running" {
+			t.Errorf("unexpected 'not running' finding when auditd is present: %+v", f)
+		}
 	}
 }
