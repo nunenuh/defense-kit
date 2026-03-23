@@ -3,6 +3,7 @@ package code_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -405,6 +406,132 @@ func TestCredentialsScanner_EvidenceTruncated(t *testing.T) {
 	for _, f := range findings {
 		if len(f.Evidence) > 200 {
 			t.Errorf("Evidence length %d exceeds 200 chars", len(f.Evidence))
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Git history scanning tests
+// ---------------------------------------------------------------------------
+
+// TestCredentialsScanner_GitHistory_DetectsDeletedAWSKey creates a temporary
+// git repo, commits a file containing a fake AWS access key, deletes the file
+// in a second commit, then verifies the scanner finds the secret in git history.
+func TestCredentialsScanner_GitHistory_DetectsDeletedAWSKey(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH, skipping git history test")
+	}
+
+	dir := t.TempDir()
+
+	// Configure a minimal git identity so commits work in CI.
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test User")
+
+	// Commit a file containing a fake AWS access key.
+	secretFile := filepath.Join(dir, "secrets.env")
+	if err := os.WriteFile(secretFile, []byte("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+		t.Fatalf("failed to write secrets file: %v", err)
+	}
+	runGit("add", "secrets.env")
+	runGit("commit", "-m", "add secrets")
+
+	// Delete the file in a second commit.
+	if err := os.Remove(secretFile); err != nil {
+		t.Fatalf("failed to remove secrets file: %v", err)
+	}
+	runGit("rm", "secrets.env")
+	runGit("commit", "-m", "remove secrets")
+
+	// Run the credentials scanner against the temp repo.
+	s := code.NewCredentialsScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	// Look for a finding from git history with CRITICAL severity.
+	var historyFindings []scanner.Finding
+	for _, f := range findings {
+		if strings.Contains(f.Location, "git history") {
+			historyFindings = append(historyFindings, f)
+		}
+	}
+
+	if len(historyFindings) == 0 {
+		t.Fatalf("expected at least one git history finding, got none (all findings: %+v)", findings)
+	}
+
+	for _, f := range historyFindings {
+		if f.Severity != scanner.SevCritical {
+			t.Errorf("git history finding severity = %v, want CRITICAL", f.Severity)
+		}
+		if !strings.Contains(f.Location, "git history") {
+			t.Errorf("Location %q does not contain 'git history'", f.Location)
+		}
+		if f.Scanner != "credentials" {
+			t.Errorf("Scanner = %q, want 'credentials'", f.Scanner)
+		}
+		if f.Remediation == "" {
+			t.Error("Remediation must not be empty")
+		}
+		assertFindingFields(t, f)
+	}
+}
+
+// TestCredentialsScanner_GitHistory_NoFalsePositiveCleanRepo verifies that a
+// clean repo with no secrets produces no git-history findings.
+func TestCredentialsScanner_GitHistory_NoFalsePositiveCleanRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH, skipping git history test")
+	}
+
+	dir := t.TempDir()
+
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test User")
+
+	// Commit a clean file.
+	cleanFile := filepath.Join(dir, "readme.txt")
+	if err := os.WriteFile(cleanFile, []byte("Hello, world!\n"), 0o644); err != nil {
+		t.Fatalf("failed to write clean file: %v", err)
+	}
+	runGit("add", "readme.txt")
+	runGit("commit", "-m", "initial commit")
+
+	s := code.NewCredentialsScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	for _, f := range findings {
+		if strings.Contains(f.Location, "git history") {
+			t.Errorf("unexpected git history finding in clean repo: %+v", f)
 		}
 	}
 }
