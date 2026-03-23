@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -94,6 +95,166 @@ func (s *CredentialsScanner) Description() string {
 	return "Scans files for leaked credentials including AWS keys, private keys, API tokens, and hardcoded passwords."
 }
 
+const gitHistoryRemediation = "Secret was committed to git history. Rotate immediately. Use `git filter-branch` or `BFG Repo-Cleaner` to purge from history."
+
+// diffFileHeader matches lines like "--- a/path/to/file" or "+++ b/path/to/file"
+var diffFileHeader = regexp.MustCompile(`^(?:---|\+\+\+) [ab]/(.+)$`)
+
+// diffHunkHeader matches "@@ -<line>,<count> +<line>,<count> @@"
+var diffHunkHeader = regexp.MustCompile(`^@@ -(\d+)`)
+
+// commitHeader matches "commit <hash>"
+var commitHeader = regexp.MustCompile(`^commit ([0-9a-f]{40})`)
+
+// scanGitHistory searches git repositories under each root for secrets that
+// were committed to history (even if later deleted). It returns one Finding
+// per unique (repo, file, commit, pattern) match.
+func (s *CredentialsScanner) scanGitHistory(ctx context.Context, roots []string) []scanner.Finding {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		// git not available — skip silently
+		return nil
+	}
+
+	// Collect unique git repos under roots.
+	repos := make(map[string]struct{})
+	for _, root := range roots {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || !info.IsDir() {
+				return nil
+			}
+			if info.Name() == ".git" {
+				// The repo root is the parent of the .git directory.
+				repos[filepath.Dir(path)] = struct{}{}
+				return filepath.SkipDir
+			}
+			return nil
+		})
+		// Also treat the root itself as a repo candidate if it has a .git dir.
+		if _, statErr := os.Stat(filepath.Join(root, ".git")); statErr == nil {
+			repos[root] = struct{}{}
+		}
+	}
+
+	var findings []scanner.Finding
+	seenIDs := make(map[string]bool)
+
+	addFinding := func(f scanner.Finding) {
+		if !seenIDs[f.ID] {
+			seenIDs[f.ID] = true
+			findings = append(findings, f)
+		}
+	}
+
+	for repo := range repos {
+		// Run two git log invocations:
+		//   1. Diffs of deleted files only (--diff-filter=D).
+		//   2. Full history of sensitive file extensions.
+		gitArgs := [][]string{
+			{"log", "--all", "-p", "--diff-filter=D", "-n", "1000"},
+			{"log", "--all", "-p", "-n", "1000", "--", "*.env", "*.pem", "*.key", "*.p12", "*.pfx"},
+		}
+
+		for _, args := range gitArgs {
+			cmd := exec.CommandContext(ctx, gitPath, args...)
+			cmd.Dir = repo
+			out, runErr := cmd.Output()
+			if runErr != nil && len(out) == 0 {
+				continue
+			}
+			repoFindings := parseGitLogOutput(out, repo)
+			for _, f := range repoFindings {
+				addFinding(f)
+			}
+		}
+	}
+
+	return findings
+}
+
+// parseGitLogOutput parses the unified-diff output of `git log -p` and returns
+// credential findings. repoPath is used to construct the Location field.
+func parseGitLogOutput(data []byte, repoPath string) []scanner.Finding {
+	var findings []scanner.Finding
+
+	var currentCommit string
+	var currentFile string
+	var currentLine int
+
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := sc.Text()
+
+		// Skip lines with null bytes (binary diffs).
+		if bytes.IndexByte([]byte(line), 0x00) >= 0 {
+			continue
+		}
+
+		// Track commit hash.
+		if m := commitHeader.FindStringSubmatch(line); m != nil {
+			currentCommit = m[1]
+			if len(currentCommit) > 7 {
+				currentCommit = currentCommit[:7]
+			}
+			currentFile = ""
+			currentLine = 0
+			continue
+		}
+
+		// Track current file from diff headers.
+		if m := diffFileHeader.FindStringSubmatch(line); m != nil {
+			currentFile = m[1]
+			currentLine = 0
+			continue
+		}
+
+		// Track line numbers from hunk headers.
+		if m := diffHunkHeader.FindStringSubmatch(line); m != nil {
+			fmt.Sscanf(m[1], "%d", &currentLine)
+			continue
+		}
+
+		// Only inspect removed lines (prefixed with "-") — these are the
+		// lines that existed in history but are no longer present.
+		if !strings.HasPrefix(line, "-") || strings.HasPrefix(line, "---") {
+			// Still increment line counter for context lines (no prefix or "+").
+			if !strings.HasPrefix(line, "+") {
+				currentLine++
+			}
+			continue
+		}
+
+		content := line[1:] // strip leading "-"
+
+		for _, p := range credentialPatterns {
+			if !p.re.MatchString(content) {
+				continue
+			}
+
+			evidence := strings.TrimSpace(content)
+			if len(evidence) > maxEvidenceLen {
+				evidence = evidence[:maxEvidenceLen]
+			}
+
+			location := fmt.Sprintf("%s:%s (git history, commit %s)", repoPath, currentFile, currentCommit)
+			findings = append(findings, scanner.Finding{
+				ID:          scanner.GenerateFindingID("credentials", location, p.title),
+				Scanner:     "credentials",
+				Severity:    scanner.SevCritical,
+				Title:       p.title,
+				Detail:      fmt.Sprintf("%s (found in git history)", p.detail),
+				Evidence:    evidence,
+				Location:    location,
+				Remediation: gitHistoryRemediation,
+			})
+		}
+
+		currentLine++
+	}
+
+	return findings
+}
+
 // Scan searches target paths for credential patterns.
 func (s *CredentialsScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]scanner.Finding, error) {
 	roots := opts.TargetPaths
@@ -173,6 +334,10 @@ func (s *CredentialsScanner) Scan(ctx context.Context, opts scanner.ScanOptions)
 		}
 		addFindings(ff)
 	}
+
+	// Scan git history for secrets that were committed and later deleted.
+	addFindings(s.scanGitHistory(ctx, roots))
+
 	return findings, nil
 }
 
