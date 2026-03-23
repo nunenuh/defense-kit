@@ -648,14 +648,128 @@ func TestBrowserScanner_Interface(t *testing.T) {
 	}
 }
 
-func TestBrowserScanner_StubReturnsNoFindings(t *testing.T) {
+func TestBrowserScanner_ScanDoesNotError(t *testing.T) {
 	s := auth.NewBrowserScanner()
+	// No browser profiles expected in the test environment; findings may vary.
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BrowserScanner — detection tests
+// ---------------------------------------------------------------------------
+
+// TestBrowserScanner_DetectsChromeLoginData verifies that a Chrome 'Login Data'
+// file in a fake home directory produces a MEDIUM finding.
+func TestBrowserScanner_DetectsChromeLoginData(t *testing.T) {
+	homesDir := t.TempDir()
+	homeDir := filepath.Join(homesDir, "testuser")
+	os.MkdirAll(homeDir, 0o700)
+
+	profileDir := filepath.Join(homeDir, ".config", "google-chrome", "Default")
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	loginData := filepath.Join(profileDir, "Login Data")
+	if err := os.WriteFile(loginData, []byte("SQLite format 3"), 0o600); err != nil {
+		t.Fatalf("WriteFile Login Data: %v", err)
+	}
+
+	s := auth.NewBrowserScannerWithHomesDir(homesDir)
 	findings, err := s.Scan(context.Background(), defaultOpts())
 	if err != nil {
 		t.Fatalf("Scan returned error: %v", err)
 	}
-	if len(findings) != 0 {
-		t.Errorf("stub Scan should return 0 findings, got %d", len(findings))
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for Chrome Login Data, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "browser" && f.Severity >= scanner.SevMedium {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM+ finding for Chrome Login Data, got: %+v", findings)
+	}
+}
+
+// TestBrowserScanner_DetectsFirefoxLogins verifies that a Firefox 'logins.json'
+// file in a fake home directory produces a MEDIUM finding.
+func TestBrowserScanner_DetectsFirefoxLogins(t *testing.T) {
+	homesDir := t.TempDir()
+	homeDir := filepath.Join(homesDir, "testuser")
+	os.MkdirAll(homeDir, 0o700)
+
+	profileDir := filepath.Join(homeDir, ".mozilla", "firefox", "abc123.default")
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	loginsJSON := filepath.Join(profileDir, "logins.json")
+	if err := os.WriteFile(loginsJSON, []byte(`{"logins":[]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile logins.json: %v", err)
+	}
+
+	s := auth.NewBrowserScannerWithHomesDir(homesDir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for Firefox logins.json, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "browser" && f.Severity >= scanner.SevMedium {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM+ finding for Firefox logins.json, got: %+v", findings)
+	}
+}
+
+// TestBrowserScanner_EscalatesToHighWhenWorldReadable verifies that a browser
+// credential file with world-readable permissions produces a HIGH finding.
+func TestBrowserScanner_EscalatesToHighWhenWorldReadable(t *testing.T) {
+	homesDir := t.TempDir()
+	homeDir := filepath.Join(homesDir, "testuser")
+	os.MkdirAll(homeDir, 0o700)
+
+	profileDir := filepath.Join(homeDir, ".config", "google-chrome", "Default")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	loginData := filepath.Join(profileDir, "Login Data")
+	// world-readable (o+r) → should escalate to HIGH.
+	if err := os.WriteFile(loginData, []byte("SQLite"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := auth.NewBrowserScannerWithHomesDir(homesDir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "browser" && f.Severity == scanner.SevHigh {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for world-readable Login Data, got: %+v", findings)
 	}
 }
 

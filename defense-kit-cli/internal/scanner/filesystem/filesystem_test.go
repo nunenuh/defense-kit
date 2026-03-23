@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner/filesystem"
@@ -211,12 +212,10 @@ func TestAnomaliesScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not return an error; findings depend on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
-	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
 	}
 }
 
@@ -239,12 +238,10 @@ func TestTimestompScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not return an error; findings depend on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
-	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
 	}
 }
 
@@ -369,11 +366,192 @@ func TestSwapScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not return an error; findings depend on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
 	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+}
+
+// ---------------------------------------------------------------------------
+// AnomaliesScanner — detection tests
+// ---------------------------------------------------------------------------
+
+// TestAnomaliesScanner_DetectsHiddenFileInSystemDir verifies that a hidden
+// dotfile placed in a system binary directory produces a HIGH finding.
+func TestAnomaliesScanner_DetectsHiddenFileInSystemDir(t *testing.T) {
+	dir := t.TempDir()
+
+	hiddenFile := filepath.Join(dir, ".hidden_evil")
+	if err := os.WriteFile(hiddenFile, []byte("malware"), 0o644); err != nil {
+		t.Fatalf("failed to create hidden file: %v", err)
+	}
+
+	s := filesystem.NewAnomaliesScannerWithDirs(nil, []string{dir}, nil)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for hidden file in system dir, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Scanner == "filesystem" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for hidden file in system dir, got: %+v", findings)
+	}
+}
+
+// TestAnomaliesScanner_DetectsWorldWritableDir verifies that a world-writable
+// directory in the scan dirs produces a MEDIUM finding.
+func TestAnomaliesScanner_DetectsWorldWritableDir(t *testing.T) {
+	parent := t.TempDir()
+	subDir := filepath.Join(parent, "writable_subdir")
+	if err := os.Mkdir(subDir, 0o777); err != nil {
+		t.Fatalf("failed to create world-writable dir: %v", err)
+	}
+	// Ensure umask doesn't strip the world-writable bit
+	if err := os.Chmod(subDir, 0o777); err != nil {
+		t.Fatalf("failed to chmod: %v", err)
+	}
+
+	s := filesystem.NewAnomaliesScannerWithDirs(nil, nil, []string{parent})
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for world-writable directory, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "filesystem" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for world-writable dir, got: %+v", findings)
+	}
+}
+
+// TestAnomaliesScanner_DetectsHiddenDotfileInTmp verifies that a hidden
+// dotfile in a tmp directory produces a MEDIUM finding.
+func TestAnomaliesScanner_DetectsHiddenDotfileInTmp(t *testing.T) {
+	dir := t.TempDir()
+
+	hiddenFile := filepath.Join(dir, ".hidden")
+	if err := os.WriteFile(hiddenFile, []byte("data"), 0o644); err != nil {
+		t.Fatalf("failed to create hidden file: %v", err)
+	}
+
+	s := filesystem.NewAnomaliesScannerWithDirs([]string{dir}, nil, nil)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for hidden dotfile in tmp, got none")
+	}
+
+	for _, f := range findings {
+		if f.ID == "" {
+			t.Error("finding has empty ID")
+		}
+		if f.Scanner != "filesystem" {
+			t.Errorf("Scanner = %q, want filesystem", f.Scanner)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TimestompScanner — detection tests
+// ---------------------------------------------------------------------------
+
+// TestTimestompScanner_DetectsFutureMtime verifies that a file with a
+// modification time in the future produces a CRITICAL finding.
+func TestTimestompScanner_DetectsFutureMtime(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "suspiciousbinary")
+	if err := os.WriteFile(fakeBin, []byte("data"), 0o755); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+
+	// Set mtime 1 hour in the future.
+	futureTime := time.Now().Add(1 * time.Hour)
+	if err := os.Chtimes(fakeBin, futureTime, futureTime); err != nil {
+		t.Fatalf("failed to set future mtime: %v", err)
+	}
+
+	info, err := os.Stat(fakeBin)
+	if err != nil {
+		t.Fatalf("os.Stat failed: %v", err)
+	}
+
+	findings := filesystem.CheckTimestomp(fakeBin, info)
+	if len(findings) == 0 {
+		t.Fatal("expected a CRITICAL finding for future mtime, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && f.Scanner == "timestomp" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for future mtime, got: %+v", findings)
+	}
+}
+
+// TestTimestompScanner_NoFindingForNormalFile verifies that a file with
+// normal timestamps does not produce any CRITICAL findings.
+func TestTimestompScanner_NoFindingForNormalFile(t *testing.T) {
+	dir := t.TempDir()
+	normalFile := filepath.Join(dir, "normal")
+	if err := os.WriteFile(normalFile, []byte("data"), 0o644); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+
+	info, err := os.Stat(normalFile)
+	if err != nil {
+		t.Fatalf("os.Stat failed: %v", err)
+	}
+
+	findings := filesystem.CheckTimestomp(normalFile, info)
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical {
+			t.Errorf("unexpected CRITICAL finding for normal file: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SwapScanner — detection tests
+// ---------------------------------------------------------------------------
+
+// TestSwapScanner_ScanDoesNotError verifies that Scan completes without error.
+func TestSwapScanner_ScanDoesNotError(t *testing.T) {
+	s := filesystem.NewSwapScanner()
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
 	}
 }
