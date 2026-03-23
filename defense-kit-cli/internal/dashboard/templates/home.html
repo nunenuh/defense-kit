@@ -1,0 +1,59 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Security Overview</h1>
+    <span class="host">{{.Host}}</span>
+    <span class="last-scan">Last scan: {{.LastScan}}</span>
+</div>
+
+<div class="severity-cards">
+    <div class="card critical">
+        <span class="count">{{.Summary.Critical}}</span>
+        <span class="label">Critical</span>
+    </div>
+    <div class="card high">
+        <span class="count">{{.Summary.High}}</span>
+        <span class="label">High</span>
+    </div>
+    <div class="card medium">
+        <span class="count">{{.Summary.Medium}}</span>
+        <span class="label">Medium</span>
+    </div>
+    <div class="card low">
+        <span class="count">{{.Summary.Low}}</span>
+        <span class="label">Low</span>
+    </div>
+</div>
+
+<div class="actions">
+    <button hx-post="/api/scan" hx-target="#scan-status">Scan Now</button>
+    <div id="scan-status"></div>
+</div>
+
+<div class="recent-findings">
+    <h2>Recent Findings</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Severity</th>
+                <th>Title</th>
+                <th>Scanner</th>
+                <th>Location</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .RecentFindings}}
+        <tr>
+            <td><span class="badge {{.SeverityClass}}">{{.SeverityLabel}}</span></td>
+            <td>{{.Title}}</td>
+            <td>{{.Scanner}}</td>
+            <td class="mono">{{.Location}}</td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="4" style="text-align:center;color:#8b949e;padding:32px 0;">No findings yet — run a scan to get started.</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}

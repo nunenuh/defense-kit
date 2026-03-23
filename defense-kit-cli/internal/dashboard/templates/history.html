@@ -1,0 +1,110 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Scan History</h1>
+    <span class="last-scan">{{len .Scans}} scans recorded</span>
+</div>
+
+<div class="chart-container">
+    <h2>Trend (last 30 days)</h2>
+    <canvas id="trend-chart" width="800" height="300"></canvas>
+</div>
+
+<div class="table-wrap">
+    <h2>All Scans</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Scan ID</th>
+                <th>Duration</th>
+                <th style="color:#f85149">Critical</th>
+                <th style="color:#f0883e">High</th>
+                <th style="color:#d29922">Medium</th>
+                <th style="color:#58a6ff">Low</th>
+                <th>Total</th>
+                <th>Findings</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Scans}}
+        <tr>
+            <td class="mono">{{.Date}}</td>
+            <td class="mono" style="color:#8b949e;font-size:11px;">{{.ScanID}}</td>
+            <td>{{.Duration}}</td>
+            <td style="color:#f85149;font-weight:600;">{{.Critical}}</td>
+            <td style="color:#f0883e;font-weight:600;">{{.High}}</td>
+            <td style="color:#d29922;font-weight:600;">{{.Medium}}</td>
+            <td style="color:#58a6ff;font-weight:600;">{{.Low}}</td>
+            <td style="font-weight:600;">{{.Total}}</td>
+            <td>
+                <a class="btn" href="/findings?scan={{.ScanID}}" style="font-size:12px;padding:4px 10px;">
+                    View
+                </a>
+            </td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="9" style="text-align:center;color:#8b949e;padding:40px 0;">
+                No scan history yet — run <code style="font-family:monospace;background:#0d1117;padding:2px 6px;border-radius:3px;">/defense-kit scan</code> to start.
+            </td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+    fetch('/api/trend?days=30')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            new Chart(document.getElementById('trend-chart'), {
+                type: 'line',
+                data: {
+                    labels: data.dates,
+                    datasets: [
+                        {label: 'Critical', data: data.critical, borderColor: '#f85149', backgroundColor: 'rgba(248,81,73,0.08)',  tension: 0.3, pointRadius: 4},
+                        {label: 'High',     data: data.high,     borderColor: '#f0883e', backgroundColor: 'rgba(240,136,62,0.08)', tension: 0.3, pointRadius: 4},
+                        {label: 'Medium',   data: data.medium,   borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.08)', tension: 0.3, pointRadius: 4},
+                        {label: 'Low',      data: data.low,      borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.08)', tension: 0.3, pointRadius: 4}
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: {
+                            labels: { color: '#c9d1d9', padding: 16, usePointStyle: true }
+                        },
+                        tooltip: {
+                            backgroundColor: '#161b22',
+                            borderColor: '#30363d',
+                            borderWidth: 1,
+                            titleColor: '#c9d1d9',
+                            bodyColor: '#8b949e'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#8b949e' },
+                            grid:  { color: 'rgba(48,54,61,0.5)' }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: '#8b949e', stepSize: 1 },
+                            grid:  { color: 'rgba(48,54,61,0.5)' }
+                        }
+                    }
+                }
+            });
+        })
+        .catch(function() {
+            document.getElementById('trend-chart').insertAdjacentHTML(
+                'afterend',
+                '<p style="color:#8b949e;font-size:13px;margin-top:8px;">Trend data unavailable — run at least one scan.</p>'
+            );
+        });
+})();
+</script>
+{{end}}

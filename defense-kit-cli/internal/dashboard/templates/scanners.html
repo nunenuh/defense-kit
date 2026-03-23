@@ -1,0 +1,80 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Scanners</h1>
+    <span class="last-scan">{{.AvailableCount}} of {{.TotalCount}} available</span>
+</div>
+
+<div class="table-wrap">
+    <h2>Built-in Scanners</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Scanners}}
+        <tr>
+            <td>
+                {{if .Available}}
+                <span class="status-dot available"></span>
+                <span class="badge ok">Available</span>
+                {{else}}
+                <span class="status-dot missing"></span>
+                <span class="badge missing">Unavailable</span>
+                {{end}}
+            </td>
+            <td style="font-weight:500;">{{.Name}}</td>
+            <td><span style="font-size:12px;color:#8b949e;">{{.Category}}</span></td>
+            <td style="color:#8b949e;">{{.Description}}</td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="4" style="text-align:center;color:#8b949e;padding:32px 0;">No scanner information available.</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+
+<div class="table-wrap">
+    <h2>External Tools</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Tool</th>
+                <th>Category</th>
+                <th>Version</th>
+                <th>Path</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .ExternalTools}}
+        <tr>
+            <td>
+                {{if .Installed}}
+                <span class="status-dot installed"></span>
+                <span class="badge ok">Installed</span>
+                {{else}}
+                <span class="status-dot missing"></span>
+                <span class="badge missing">Not Found</span>
+                {{end}}
+            </td>
+            <td style="font-weight:500;">{{.Name}}</td>
+            <td><span style="font-size:12px;color:#8b949e;">{{.Category}}</span></td>
+            <td class="mono">{{if .Version}}{{.Version}}{{else}}<span style="color:#6e7681">—</span>{{end}}</td>
+            <td class="mono" style="font-size:11px;color:#8b949e;">{{if .Path}}{{.Path}}{{else}}<span style="color:#6e7681">—</span>{{end}}</td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="5" style="text-align:center;color:#8b949e;padding:32px 0;">No external tool information available.</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
