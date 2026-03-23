@@ -1,0 +1,4 @@
+services:
+  vulnerable:
+    build: .
+    container_name: defense-kit-test-vulnerable

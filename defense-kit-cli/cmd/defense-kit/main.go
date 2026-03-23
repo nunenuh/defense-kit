@@ -18,7 +18,9 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/dashboard"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/logger"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/monitor"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/outputs"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/schedule"
@@ -28,6 +30,7 @@ import (
 var (
 	cfgFile string
 	verbose bool
+	logPath string
 )
 
 func main() {
@@ -49,6 +52,13 @@ audit, harden, and monitor your Linux systems.`,
 
 	root.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.defense-kit.yaml)")
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
+	root.PersistentFlags().StringVar(&logPath, "log-file", "", "write structured JSON logs to this file")
+
+	// Initialise logger as early as possible (flags parsed by cobra before RunE).
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		logger.Init(verbose, logPath)
+		return nil
+	}
 
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newHardenCmd())
@@ -59,6 +69,7 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newScheduleCmd())
 	root.AddCommand(newComplyCmd())
 	root.AddCommand(newDashboardCmd())
+	root.AddCommand(newOutputsCmd())
 
 	return root
 }
@@ -92,14 +103,7 @@ func hostname() string {
 
 // signalContext returns a context that is cancelled when SIGINT or SIGTERM is received.
 func signalContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-ch
-		cancel()
-	}()
-	return ctx, cancel
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 // executableDir returns the directory containing the running binary.
@@ -132,6 +136,7 @@ func newScanCmd() *cobra.Command {
 		quick        bool
 		diff         bool
 		category     string
+		profile      string
 		output       string
 		concurrency  int
 		htmlPath     string
@@ -145,13 +150,14 @@ func newScanCmd() *cobra.Command {
 It checks for security misconfigurations, vulnerability indicators,
 and deviations from a known baseline.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runScan(cfgFile, quick, diff, category, output, concurrency, htmlPath, alertEnabled)
+			return runScan(cfgFile, quick, diff, category, profile, output, concurrency, htmlPath, alertEnabled)
 		},
 	}
 
 	cmd.Flags().BoolVar(&quick, "quick", false, "run a quick scan (skip expensive checks)")
 	cmd.Flags().BoolVar(&diff, "diff", false, "show only changes since last baseline")
 	cmd.Flags().StringVar(&category, "category", "", "limit scan to a specific category (e.g. network, files, users)")
+	cmd.Flags().StringVar(&profile, "profile", "", "use a named scan profile: workstation, server, ci")
 	cmd.Flags().StringVarP(&output, "output", "o", "text", "output format: text, json, yaml")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "number of concurrent scan workers")
 	cmd.Flags().StringVar(&htmlPath, "html", "", "path to write HTML report (e.g. report.html)")
@@ -160,10 +166,17 @@ and deviations from a known baseline.`,
 	return cmd
 }
 
-func runScan(cfgPath string, quick, diff bool, category, output string, concurrency int, htmlPath string, alertEnabled bool) error {
+func runScan(cfgPath string, quick, diff bool, category, profile, output string, concurrency int, htmlPath string, alertEnabled bool) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Validate config and print any warnings.
+	if warns := cfg.Validate(); len(warns) > 0 {
+		for _, w := range warns {
+			fmt.Fprintf(os.Stderr, "config warning: %s\n", w)
+		}
 	}
 
 	// Parse timeout from config.
@@ -177,9 +190,16 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 		concurrency = cfg.Scan.Concurrency
 	}
 
-	// Build categories filter.
+	// Build categories filter: --profile > --category > config categories.
 	var categories []string
-	if category != "" {
+	if profile != "" {
+		p, ok := cfg.Profiles[profile]
+		if !ok {
+			return fmt.Errorf("unknown profile %q — available profiles: workstation, server, ci", profile)
+		}
+		categories = p.Categories
+		logger.Log.Debug("scan profile selected", "profile", profile, "categories", categories)
+	} else if category != "" {
 		categories = []string{category}
 	} else if len(cfg.Scan.Categories) > 0 {
 		categories = cfg.Scan.Categories
@@ -206,7 +226,13 @@ func runScan(cfgPath string, quick, diff bool, category, output string, concurre
 	engine := scanner.NewEngine(reg)
 
 	fmt.Fprintf(os.Stdout, "Running scan (concurrency=%d, timeout=%s)...\n", concurrency, timeout)
-	results := engine.Run(ctx, opts)
+	logger.Log.Info("scan started", "concurrency", concurrency, "timeout", timeout.String(), "profile", profile)
+
+	progress := func(current, total int, scannerName string) {
+		fmt.Fprintf(os.Stderr, "[%d/%d] Scanning: %s...\n", current, total, scannerName)
+		logger.Log.Debug("scanner running", "current", current, "total", total, "scanner", scannerName)
+	}
+	results := engine.RunWithProgress(ctx, opts, progress)
 
 	// Render to terminal.
 	term := reporter.NewTerminalReporter(os.Stdout)
@@ -1160,4 +1186,63 @@ func openURL(url string) error {
 	runner := tools.NewRunner()
 	_, err := runner.Run(context.Background(), "xdg-open", []string{url})
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// Outputs command
+// ---------------------------------------------------------------------------
+
+func newOutputsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "outputs",
+		Short: "Manage scan output files",
+		Long:  `outputs manages the scan result files stored under ~/.defense-kit/outputs.`,
+	}
+
+	cmd.AddCommand(newOutputsListCmd())
+	cmd.AddCommand(newOutputsCleanCmd())
+
+	return cmd
+}
+
+func newOutputsListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List saved scan outputs",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			entries, err := outputs.List(outputsDir())
+			if err != nil {
+				return fmt.Errorf("outputs list: %w", err)
+			}
+			if len(entries) == 0 {
+				fmt.Fprintln(os.Stdout, "No scan outputs found.")
+				return nil
+			}
+			fmt.Fprintf(os.Stdout, "%-30s  %s\n", "SCAN ID", "SIZE")
+			for _, e := range entries {
+				fmt.Fprintf(os.Stdout, "%-30s  %d bytes\n", e.Name, e.Size)
+			}
+			return nil
+		},
+	}
+}
+
+func newOutputsCleanCmd() *cobra.Command {
+	var keep int
+
+	cmd := &cobra.Command{
+		Use:   "clean",
+		Short: "Remove old scan outputs, keeping the N most recent",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			deleted, err := outputs.Clean(outputsDir(), keep)
+			if err != nil {
+				return fmt.Errorf("outputs clean: %w", err)
+			}
+			fmt.Fprintf(os.Stdout, "Deleted %d scan output(s).\n", deleted)
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&keep, "keep", 10, "number of most recent outputs to keep")
+	return cmd
 }
