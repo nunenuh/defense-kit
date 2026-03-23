@@ -3,15 +3,15 @@
 # defense-kit local installer
 #
 # Usage:
-#   ./install.sh                     # build + install to ~/.local/bin
+#   ./install.sh                     # build + install + tools
 #   ./install.sh --prefix /usr/local # install to /usr/local/bin
-#   ./install.sh --with-tools        # also install external security tools
+#   ./install.sh --no-tools          # skip external security tools
 #
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${HOME}/.local"
-INSTALL_TOOLS=false
+INSTALL_TOOLS=true
 BINARY_NAME="defense-kit"
 
 # Colors
@@ -33,16 +33,16 @@ while [[ $# -gt 0 ]]; do
             PREFIX="$2"
             shift 2
             ;;
-        --with-tools)
-            INSTALL_TOOLS=true
+        --no-tools)
+            INSTALL_TOOLS=false
             shift
             ;;
         --help|-h)
-            echo "Usage: ./install.sh [--prefix /path] [--with-tools]"
+            echo "Usage: ./install.sh [--prefix /path] [--no-tools]"
             echo ""
             echo "Options:"
             echo "  --prefix PATH    Install to PATH/bin (default: ~/.local)"
-            echo "  --with-tools     Also install external security tools"
+            echo "  --no-tools       Skip installing external security tools (installed by default)"
             exit 0
             ;;
         *)

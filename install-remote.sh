@@ -4,12 +4,11 @@
 #
 # Install via:
 #   curl -sSL https://get.nunenuh.me/defense-kit | bash
-#   curl -sSL https://get.nunenuh.me/defense-kit | bash -s -- --with-tools
 #   wget -qO- https://get.nunenuh.me/defense-kit | bash
 #
 # Options (pass after -- when piping):
 #   --prefix /path     Install to /path/bin (default: ~/.local)
-#   --with-tools       Also install external security tools
+#   --no-tools         Skip installing external security tools
 #   --version TAG      Install specific version (default: latest)
 #
 set -euo pipefail
@@ -17,7 +16,7 @@ set -euo pipefail
 REPO="nunenuh/defense-kit"
 GITHUB_URL="https://github.com/${REPO}"
 PREFIX="${HOME}/.local"
-INSTALL_TOOLS=false
+INSTALL_TOOLS=true
 VERSION="latest"
 BINARY_NAME="defense-kit"
 TMPDIR=""
@@ -49,8 +48,8 @@ while [[ $# -gt 0 ]]; do
             PREFIX="$2"
             shift 2
             ;;
-        --with-tools)
-            INSTALL_TOOLS=true
+        --no-tools)
+            INSTALL_TOOLS=false
             shift
             ;;
         --version)
@@ -62,7 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --prefix PATH    Install to PATH/bin (default: ~/.local)"
-            echo "  --with-tools     Also install external security tools"
+            echo "  --no-tools       Skip installing external security tools (installed by default)"
             echo "  --version TAG    Install specific version (default: latest)"
             exit 0
             ;;
