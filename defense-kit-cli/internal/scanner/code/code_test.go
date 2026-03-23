@@ -677,3 +677,105 @@ func assertFindingFields(t *testing.T, f scanner.Finding) {
 		t.Error("finding has empty Remediation")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DockerRuntimeScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestDockerRuntimeScanner_Interface(t *testing.T) {
+	s := code.NewDockerRuntimeScanner()
+
+	if s.Name() != "docker_runtime" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "docker_runtime")
+	}
+	if s.Category() != "code" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "code")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+
+	var _ scanner.Scanner = s
+}
+
+func TestDockerRuntimeScanner_DoesNotPanic(t *testing.T) {
+	s := code.NewDockerRuntimeScanner()
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+}
+
+// TestDockerRuntimeScanner_DetectsWorldReadableSocket creates a temp file
+// with world-readable permissions to simulate an exposed Docker socket and
+// verifies a CRITICAL finding is produced.
+func TestDockerRuntimeScanner_DetectsWorldReadableSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && f.Scanner == "docker_runtime" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for world-readable Docker socket, got: %+v", findings)
+	}
+}
+
+// TestDockerRuntimeScanner_NoFindingForRestrictedSocket verifies that a socket
+// with owner-only permissions (0o600) produces no socket-permission finding.
+func TestDockerRuntimeScanner_NoFindingForRestrictedSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if strings.Contains(f.Title, "world") {
+			t.Errorf("unexpected socket permission finding for restricted socket: %+v", f)
+		}
+	}
+}
+
+// TestDockerRuntimeScanner_NoFindingWhenSocketAbsent verifies that when the
+// Docker socket does not exist the scanner returns no findings and no error.
+func TestDockerRuntimeScanner_NoFindingWhenSocketAbsent(t *testing.T) {
+	dir := t.TempDir()
+	s := code.NewDockerRuntimeScannerWithSocket(filepath.Join(dir, "nonexistent.sock"))
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings when socket absent, got %d: %+v", len(findings), findings)
+	}
+}
