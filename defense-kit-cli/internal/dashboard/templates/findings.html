@@ -1,0 +1,127 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Findings</h1>
+    <span class="last-scan">{{.TotalCount}} findings total</span>
+</div>
+
+<div class="filters">
+    <label for="filter-severity">Severity:</label>
+    <select id="filter-severity" onchange="applyFilters()">
+        <option value="">All</option>
+        <option value="critical">Critical</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+    </select>
+
+    <label for="filter-scanner">Scanner:</label>
+    <select id="filter-scanner" onchange="applyFilters()">
+        <option value="">All Scanners</option>
+        {{range .Scanners}}
+        <option value="{{.}}">{{.}}</option>
+        {{end}}
+    </select>
+
+    <input type="search" id="filter-search" placeholder="Search findings…" oninput="applyFilters()">
+</div>
+
+<div class="table-wrap">
+    <table id="findings-table">
+        <thead>
+            <tr>
+                <th>Severity</th>
+                <th>Title</th>
+                <th>Scanner</th>
+                <th>Location</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Findings}}
+        <tr class="finding-row"
+            data-id="{{.ID}}"
+            data-severity="{{.SeverityClass}}"
+            data-scanner="{{.Scanner}}"
+            onclick="toggleDetail(this)">
+            <td><span class="badge {{.SeverityClass}}">{{.SeverityLabel}}</span></td>
+            <td>{{.Title}}</td>
+            <td>{{.Scanner}}</td>
+            <td class="mono">{{.Location}}</td>
+            <td>
+                <button class="btn" onclick="event.stopPropagation(); toggleDetail(this.closest('tr'))">
+                    Details
+                </button>
+            </td>
+        </tr>
+        <tr class="detail-row" id="detail-{{.ID}}" style="display:none;">
+            <td colspan="5">
+                <div class="detail-content">
+                    {{if .Description}}
+                    <div class="field-label">Description</div>
+                    <div>{{.Description}}</div>
+                    {{end}}
+
+                    {{if .Evidence}}
+                    <div class="field-label">Evidence</div>
+                    <pre class="evidence">{{.Evidence}}</pre>
+                    {{end}}
+
+                    {{if .Remediation}}
+                    <div class="field-label">Remediation</div>
+                    <div class="remediation">{{.Remediation}}</div>
+                    {{end}}
+
+                    {{if .Reference}}
+                    <div class="field-label">Reference</div>
+                    <div><a href="{{.Reference}}" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;">{{.Reference}}</a></div>
+                    {{end}}
+                </div>
+            </td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="5" style="text-align:center;color:#8b949e;padding:40px 0;">
+                No findings match the current filters.
+            </td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+
+<script>
+function toggleDetail(row) {
+    if (!row.classList.contains('finding-row')) return;
+    var id     = row.getAttribute('data-id');
+    var detail = document.getElementById('detail-' + id);
+    if (!detail) return;
+    var open = detail.style.display !== 'none';
+    detail.style.display = open ? 'none' : 'table-row';
+    row.classList.toggle('open', !open);
+}
+
+function applyFilters() {
+    var sev     = document.getElementById('filter-severity').value.toLowerCase();
+    var scanner = document.getElementById('filter-scanner').value.toLowerCase();
+    var search  = document.getElementById('filter-search').value.toLowerCase();
+    var rows    = document.querySelectorAll('#findings-table .finding-row');
+
+    rows.forEach(function(row) {
+        var rowSev     = (row.getAttribute('data-severity') || '').toLowerCase();
+        var rowScanner = (row.getAttribute('data-scanner')  || '').toLowerCase();
+        var rowText    = row.textContent.toLowerCase();
+
+        var show = true;
+        if (sev     && rowSev     !== sev)          show = false;
+        if (scanner && rowScanner !== scanner)       show = false;
+        if (search  && !rowText.includes(search))    show = false;
+
+        var id     = row.getAttribute('data-id');
+        var detail = document.getElementById('detail-' + id);
+        row.style.display                  = show ? '' : 'none';
+        if (detail) detail.style.display   = 'none';
+        row.classList.remove('open');
+    });
+}
+</script>
+{{end}}
