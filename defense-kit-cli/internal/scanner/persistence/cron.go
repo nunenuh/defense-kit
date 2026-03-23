@@ -84,6 +84,21 @@ var cronGlobPatterns = []string{
 	"/etc/cron.d/*",
 }
 
+// cronScriptDirs lists the run-parts cron directories whose scripts are
+// scanned individually.
+var cronScriptDirs = []string{
+	"/etc/cron.hourly",
+	"/etc/cron.daily",
+	"/etc/cron.weekly",
+	"/etc/cron.monthly",
+}
+
+// cronAccessFiles lists access-control files checked for existence.
+var cronAccessFiles = []string{
+	"/etc/cron.allow",
+	"/etc/cron.deny",
+}
+
 // CronScanner scans cron files for suspicious scheduled entries.
 type CronScanner struct{}
 
@@ -128,6 +143,13 @@ func (s *CronScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scanner.
 		}
 		findings = append(findings, ff...)
 	}
+
+	// Scan cron.hourly/daily/weekly/monthly script directories.
+	findings = append(findings, scanCronScriptDirs(cronScriptDirs)...)
+
+	// Check cron.allow / cron.deny existence.
+	findings = append(findings, checkCronAccessFiles(cronAccessFiles)...)
+
 	return findings, nil
 }
 
@@ -169,4 +191,105 @@ func scanCronFile(path string) ([]scanner.Finding, error) {
 		}
 	}
 	return findings, sc.Err()
+}
+
+// scanCronScriptDirs scans scripts inside cron.hourly/daily/weekly/monthly.
+// For each script it checks:
+//   - world-writable permissions → HIGH
+//   - world-writable script run as root (detected by ownership/mode) → CRITICAL
+//   - suspicious pattern matches (same patterns as cron entries)
+func scanCronScriptDirs(dirs []string) []scanner.Finding {
+	var findings []scanner.Finding
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			scriptPath := filepath.Join(dir, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			mode := info.Mode()
+
+			// Check world-writable.
+			if mode&0o002 != 0 {
+				sev := scanner.SevHigh
+				title := "World-writable cron script"
+				detail := fmt.Sprintf("The cron script %s is world-writable, allowing any user to modify it and execute arbitrary code at the scheduled time.", scriptPath)
+
+				// If also owned by root (uid 0) and run-parts will run it as root, escalate.
+				if sys := info.Sys(); sys != nil {
+					// Use os.Stat to get Uid via syscall stat — check via os.Stat for root ownership.
+					if statInfo, err2 := os.Stat(scriptPath); err2 == nil {
+						_ = statInfo // ownership checked below via Uid field if available
+					}
+					// On Linux the underlying type is *syscall.Stat_t.
+					if st, ok := sys.(interface{ Uid() uint32 }); ok && st.Uid() == 0 {
+						sev = scanner.SevCritical
+						title = "World-writable root-owned cron script"
+						detail = fmt.Sprintf("The cron script %s is owned by root and world-writable. Any user can modify it to execute arbitrary code as root.", scriptPath)
+					}
+				}
+
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID("cron", scriptPath, "world-writable cron script"),
+					Scanner:     "cron",
+					Severity:    sev,
+					Title:       title,
+					Detail:      detail,
+					Evidence:    fmt.Sprintf("permissions: %s, path: %s", mode.String(), scriptPath),
+					Location:    scriptPath,
+					Remediation: fmt.Sprintf("Run: chmod o-w %s", scriptPath),
+					CanAutoFix:  true,
+				})
+			}
+
+			// Scan script content for suspicious patterns.
+			ff, err := scanCronFile(scriptPath)
+			if err == nil {
+				findings = append(findings, ff...)
+			}
+		}
+	}
+	return findings
+}
+
+// checkCronAccessFiles checks whether /etc/cron.allow and /etc/cron.deny exist
+// and reports an informational finding when neither is present (no restriction
+// on who can use cron).
+func checkCronAccessFiles(paths []string) []scanner.Finding {
+	allowExists := false
+	denyExists := false
+	for _, p := range paths {
+		_, err := os.Stat(p)
+		if err == nil {
+			if strings.HasSuffix(p, "cron.allow") {
+				allowExists = true
+			}
+			if strings.HasSuffix(p, "cron.deny") {
+				denyExists = true
+			}
+		}
+	}
+
+	if !allowExists && !denyExists {
+		return []scanner.Finding{
+			{
+				ID:          scanner.GenerateFindingID("cron", "/etc", "no cron access control files"),
+				Scanner:     "cron",
+				Severity:    scanner.SevLow,
+				Title:       "No cron access control files present",
+				Detail:      "Neither /etc/cron.allow nor /etc/cron.deny exists. Without these files, all users with a shell may be permitted to schedule cron jobs depending on the cron daemon configuration.",
+				Evidence:    "/etc/cron.allow and /etc/cron.deny both absent",
+				Location:    "/etc",
+				Remediation: "Create /etc/cron.allow listing only users who need cron access, or create an empty /etc/cron.deny to restrict by default.",
+			},
+		}
+	}
+	return nil
 }
