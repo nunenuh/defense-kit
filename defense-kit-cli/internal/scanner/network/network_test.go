@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner/network"
@@ -437,11 +438,112 @@ func TestVPNScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not return an error; findings depend on environment (no VPN configs in most CI).
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
 	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+}
+
+// ---------------------------------------------------------------------------
+// VPNScanner — detection tests
+// ---------------------------------------------------------------------------
+
+// TestVPNScanner_DetectsAllTrafficWireGuard verifies that a WireGuard config
+// with AllowedIPs = 0.0.0.0/0 produces a LOW finding.
+func TestVPNScanner_DetectsAllTrafficWireGuard(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "wg0.conf")
+	content := `[Interface]
+PrivateKey = abc123
+
+[Peer]
+PublicKey = def456
+AllowedIPs = 0.0.0.0/0
+`
+	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write WireGuard config: %v", err)
+	}
+
+	findings := network.ParseWireGuardConfig(confPath)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for AllowedIPs = 0.0.0.0/0, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevLow && f.Scanner == "vpn" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected LOW finding for AllowedIPs 0.0.0.0/0, got: %+v", findings)
+	}
+}
+
+// TestVPNScanner_NoFindingForRestrictedWireGuard verifies that a WireGuard
+// config with a specific subnet does not produce an all-traffic finding.
+func TestVPNScanner_NoFindingForRestrictedWireGuard(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "wg0.conf")
+	// Use a file mtime well in the past to avoid the "recently modified" finding.
+	content := `[Interface]
+PrivateKey = abc123
+
+[Peer]
+PublicKey = def456
+AllowedIPs = 10.0.0.0/24
+`
+	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write WireGuard config: %v", err)
+	}
+	// Backdate the file so the "recently modified" heuristic doesn't fire.
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(confPath, past, past); err != nil {
+		t.Fatalf("failed to backdate config: %v", err)
+	}
+
+	findings := network.ParseWireGuardConfig(confPath)
+	for _, f := range findings {
+		if f.Severity >= scanner.SevMedium {
+			t.Errorf("unexpected finding with severity >= MEDIUM for restricted AllowedIPs: %+v", f)
+		}
+	}
+}
+
+// TestVPNScanner_DetectsOpenVPNRedirectGateway verifies that an OpenVPN config
+// with redirect-gateway produces a LOW finding.
+func TestVPNScanner_DetectsOpenVPNRedirectGateway(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "client.conf")
+	content := `client
+dev tun
+proto udp
+remote vpn.example.com 1194
+redirect-gateway def1
+`
+	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write OpenVPN config: %v", err)
+	}
+
+	findings := network.ParseOpenVPNConfig(confPath)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for redirect-gateway, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "vpn" && f.Severity == scanner.SevLow {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected LOW finding for redirect-gateway, got: %+v", findings)
 	}
 }

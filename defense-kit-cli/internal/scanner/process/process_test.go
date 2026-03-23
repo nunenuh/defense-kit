@@ -195,13 +195,12 @@ func TestMemoryScanner_DetectsDeletedExe(t *testing.T) {
 	}
 }
 
-func TestClipboardScanner_ScanReturnsNil(t *testing.T) {
+func TestClipboardScanner_ScanDoesNotError(t *testing.T) {
 	s := process.NewClipboardScanner()
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not return an error; findings depend on whether any keylogger
+	// processes are running in the test environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Fatalf("Scan returned unexpected error: %v", err)
-	}
-	if findings != nil {
-		t.Errorf("expected nil findings from stub, got %v", findings)
 	}
 }
