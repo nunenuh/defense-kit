@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
@@ -57,6 +59,7 @@ var suspiciousModulePatterns = []string{
 // suspicious device files in /dev, and processes hidden from /proc.
 type RootkitScanner struct {
 	procModulesPath string
+	sysModulePath   string
 	devPath         string
 	procPath        string
 }
@@ -65,6 +68,7 @@ type RootkitScanner struct {
 func NewRootkitScanner() *RootkitScanner {
 	return &RootkitScanner{
 		procModulesPath: "/proc/modules",
+		sysModulePath:   "/sys/module",
 		devPath:         "/dev",
 		procPath:        "/proc",
 	}
@@ -112,6 +116,16 @@ func (s *RootkitScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]
 	moduleFindings, err := s.checkKernelModules()
 	if err == nil {
 		addFindings(moduleFindings)
+	}
+
+	hidingFindings, err := s.checkHidingModules()
+	if err == nil {
+		addFindings(hidingFindings)
+	}
+
+	recentModuleFindings, err := s.checkRecentlyLoadedModules()
+	if err == nil {
+		addFindings(recentModuleFindings)
 	}
 
 	devFindings, err := s.checkDevFiles()
@@ -339,6 +353,164 @@ func (s *RootkitScanner) checkHiddenProcesses() ([]scanner.Finding, error) {
 		}
 	}
 
+	return findings, nil
+}
+
+// checkHidingModules compares /proc/modules against /sys/module/ directory.
+// Modules present in /sys/module but absent from /proc/modules are hiding
+// themselves — a strong rootkit indicator.
+func (s *RootkitScanner) checkHidingModules() ([]scanner.Finding, error) {
+	// Read modules visible via /proc/modules.
+	procMods, err := s.readProcModuleNames()
+	if err != nil {
+		return nil, fmt.Errorf("checkHidingModules: %w", err)
+	}
+
+	// Read modules present in /sys/module/.
+	sysMods, err := os.ReadDir(s.sysModulePath)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", s.sysModulePath, err)
+	}
+
+	var findings []scanner.Finding
+	for _, entry := range sysMods {
+		if !entry.IsDir() {
+			continue
+		}
+		// /sys/module uses underscores; /proc/modules may use hyphens or underscores.
+		name := entry.Name()
+		normalized := strings.ReplaceAll(name, "-", "_")
+		if procMods[normalized] {
+			continue
+		}
+		loc := filepath.Join(s.sysModulePath, name)
+		findings = append(findings, scanner.Finding{
+			ID:          scanner.GenerateFindingID(s.Name(), loc, "module hiding from proc/modules"),
+			Scanner:     s.Name(),
+			Severity:    scanner.SevCritical,
+			Title:       "Kernel module hiding from /proc/modules",
+			Detail:      fmt.Sprintf("Module %q is present in %s but does not appear in /proc/modules. A rootkit may be intercepting the module list to hide this module.", name, s.sysModulePath),
+			Evidence:    fmt.Sprintf("present in /sys/module/%s, absent from /proc/modules", name),
+			Location:    loc,
+			Remediation: fmt.Sprintf("Investigate module %q with 'modinfo %s'. This may indicate a kernel-level rootkit. Consider booting from trusted media for a clean audit.", name, name),
+		})
+	}
+	return findings, nil
+}
+
+// readProcModuleNames returns a set of module names (normalized with underscores)
+// currently listed in /proc/modules.
+func (s *RootkitScanner) readProcModuleNames() (map[string]bool, error) {
+	f, err := os.Open(s.procModulesPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", s.procModulesPath, err)
+	}
+	defer f.Close()
+
+	mods := make(map[string]bool)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+		normalized := strings.ReplaceAll(parts[0], "-", "_")
+		mods[normalized] = true
+	}
+	return mods, sc.Err()
+}
+
+// recentModuleThreshold is how recently a module must have been loaded (based
+// on /sys/module/*/initstate mtime) to be flagged as potentially suspicious.
+const recentModuleThreshold = 10 * time.Minute
+
+// checkRecentlyLoadedModules flags modules whose /sys/module/*/initstate file
+// was modified very recently, which may indicate a module was just loaded.
+func (s *RootkitScanner) checkRecentlyLoadedModules() ([]scanner.Finding, error) {
+	sysMods, err := os.ReadDir(s.sysModulePath)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", s.sysModulePath, err)
+	}
+
+	now := time.Now()
+	var findings []scanner.Finding
+
+	for _, entry := range sysMods {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		initstatePath := filepath.Join(s.sysModulePath, name, "initstate")
+		info, err := os.Stat(initstatePath)
+		if err != nil {
+			continue
+		}
+		age := now.Sub(info.ModTime())
+		if age > recentModuleThreshold {
+			continue
+		}
+
+		// Also flag modules with no/suspicious modinfo description.
+		description := getModinfoDescription(name)
+		descNote := ""
+		if description == "" {
+			descNote = " Module has no modinfo description, which is unusual for legitimate modules."
+		}
+
+		loc := initstatePath
+		findings = append(findings, scanner.Finding{
+			ID:          scanner.GenerateFindingID(s.Name(), loc, "recently loaded kernel module"),
+			Scanner:     s.Name(),
+			Severity:    scanner.SevMedium,
+			Title:       "Recently loaded kernel module",
+			Detail:      fmt.Sprintf("Module %q was loaded within the last %s (initstate mtime: %s).%s Verify this is an expected module load.", name, recentModuleThreshold, info.ModTime().Format(time.RFC3339), descNote),
+			Evidence:    fmt.Sprintf("module=%s initstate_mtime=%s age=%s", name, info.ModTime().Format(time.RFC3339), age.Round(time.Second)),
+			Location:    loc,
+			Remediation: fmt.Sprintf("Run 'modinfo %s' and verify the module is expected. If not, unload with 'rmmod %s' and investigate.", name, name),
+		})
+	}
+	return findings, nil
+}
+
+// getModinfoDescription runs 'modinfo -F description <name>' and returns the
+// trimmed output, or empty string if the command fails or produces no output.
+func getModinfoDescription(name string) string {
+	cmd := exec.Command("modinfo", "-F", "description", name)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// checkModinfoDescriptions flags loaded modules that have empty modinfo
+// descriptions. Legitimate kernel modules almost always have a description;
+// absence is unusual and warrants investigation.
+func (s *RootkitScanner) checkModinfoDescriptions() ([]scanner.Finding, error) {
+	procMods, err := s.readProcModuleNames()
+	if err != nil {
+		return nil, err
+	}
+
+	var findings []scanner.Finding
+	for name := range procMods {
+		desc := getModinfoDescription(name)
+		if desc != "" {
+			continue
+		}
+		loc := s.procModulesPath
+		findings = append(findings, scanner.Finding{
+			ID:          scanner.GenerateFindingID(s.Name(), loc, "no modinfo description: "+name),
+			Scanner:     s.Name(),
+			Severity:    scanner.SevMedium,
+			Title:       "Kernel module with no description",
+			Detail:      fmt.Sprintf("Module %q has no modinfo description. Legitimate kernel modules almost always include a description; absence may indicate a hand-compiled or malicious module.", name),
+			Evidence:    fmt.Sprintf("module=%s description=(empty)", name),
+			Location:    loc,
+			Remediation: fmt.Sprintf("Run 'modinfo %s' to inspect the module. Unload with 'rmmod %s' if it is not expected.", name, name),
+		})
+	}
 	return findings, nil
 }
 

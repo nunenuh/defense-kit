@@ -257,8 +257,8 @@ func TestCapabilitiesScanner_Interface(t *testing.T) {
 	if s.Category() != "filesystem" {
 		t.Errorf("Category() = %q, want %q", s.Category(), "filesystem")
 	}
-	if s.RequiresRoot() {
-		t.Error("RequiresRoot() should be false")
+	if !s.RequiresRoot() {
+		t.Error("RequiresRoot() should be true")
 	}
 	if !s.Available() {
 		t.Error("Available() should be true")
@@ -267,12 +267,86 @@ func TestCapabilitiesScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not error; findings depend on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
 	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+}
+
+// TestCapabilitiesScanner_DetectsCapSetuid verifies that getcap output
+// containing cap_setuid produces a CRITICAL finding.
+func TestCapabilitiesScanner_DetectsCapSetuid(t *testing.T) {
+	output := "/usr/bin/somebinary cap_setuid=ep\n"
+	findings := filesystem.ParseGetcapOutput(output)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for cap_setuid, got none")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && f.Scanner == "capabilities" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a CRITICAL finding for cap_setuid, got: %+v", findings)
+	}
+}
+
+// TestCapabilitiesScanner_DetectsCapNetRaw verifies that cap_net_raw produces
+// a HIGH finding.
+func TestCapabilitiesScanner_DetectsCapNetRaw(t *testing.T) {
+	output := "/usr/bin/ping cap_net_raw=ep\n"
+	findings := filesystem.ParseGetcapOutput(output)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for cap_net_raw, got none")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Scanner == "capabilities" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a HIGH finding for cap_net_raw, got: %+v", findings)
+	}
+}
+
+// TestCapabilitiesScanner_DetectsSuspiciousPath verifies that any capability
+// on a binary in /tmp or /home produces a CRITICAL finding.
+func TestCapabilitiesScanner_DetectsSuspiciousPath(t *testing.T) {
+	output := "/tmp/evilbinary cap_net_raw=ep\n"
+	findings := filesystem.ParseGetcapOutput(output)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for capability on /tmp binary, got none")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && f.Scanner == "capabilities" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a CRITICAL finding for /tmp binary with capability, got: %+v", findings)
+	}
+}
+
+// TestCapabilitiesScanner_NoFindingsForUnknownCap verifies that an unknown or
+// low-risk capability does not produce a finding.
+func TestCapabilitiesScanner_NoFindingsForUnknownCap(t *testing.T) {
+	output := "/usr/bin/somebinary cap_chown=ep\n"
+	findings := filesystem.ParseGetcapOutput(output)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for cap_chown, got %d: %+v", len(findings), findings)
 	}
 }
 

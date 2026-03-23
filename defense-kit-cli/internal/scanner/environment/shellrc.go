@@ -73,6 +73,17 @@ var shellRCPatterns = []shellRCPattern{
 	},
 }
 
+// reSourceCommand matches lines that source an external file:
+//   source /path/to/file  or  . /path/to/file
+var reSourceCommand = regexp.MustCompile(`^(?:source|\.)\s+(\S+)`)
+
+// reSuspiciousFunction matches function definitions that contain curl/wget/nc.
+var reSuspiciousFunction = regexp.MustCompile(`(?i)(curl|wget|\bnc\b)`)
+
+// reLongBase64 matches long base64-only strings (>50 chars) not followed by eval.
+// We look for runs of base64 alphabet characters of length >= 51.
+var reLongBase64 = regexp.MustCompile(`[A-Za-z0-9+/]{51,}={0,2}`)
+
 // rcFileNames lists the shell RC files to scan within each target directory
 // (or home directory by default).
 var rcFileNames = []string{
@@ -135,7 +146,17 @@ func (s *ShellRCScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]
 }
 
 // scanRCFile scans a single RC file and returns findings.
+// It also follows source/. commands to scan included files (one level deep),
+// detects long base64 strings, and flags suspicious function definitions.
 func scanRCFile(path string) ([]scanner.Finding, error) {
+	return scanRCFileDepth(path, 0)
+}
+
+// maxSourceDepth limits recursive source-following to prevent cycles.
+const maxSourceDepth = 1
+
+// scanRCFileDepth is the implementation of scanRCFile with depth tracking.
+func scanRCFileDepth(path string, depth int) ([]scanner.Finding, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -144,6 +165,9 @@ func scanRCFile(path string) ([]scanner.Finding, error) {
 
 	var findings []scanner.Finding
 	lineNum := 0
+	inFunction := false
+	functionBody := strings.Builder{}
+
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		lineNum++
@@ -155,6 +179,36 @@ func scanRCFile(path string) ([]scanner.Finding, error) {
 			continue
 		}
 
+		// Track function body for suspicious function detection.
+		if strings.Contains(trimmed, "()") && strings.Contains(trimmed, "{") {
+			inFunction = true
+			functionBody.Reset()
+		}
+		if inFunction {
+			functionBody.WriteString(trimmed)
+			functionBody.WriteByte('\n')
+			if trimmed == "}" {
+				// End of function — check its body.
+				body := functionBody.String()
+				if reSuspiciousFunction.MatchString(body) {
+					location := fmt.Sprintf("%s:%d", path, lineNum)
+					findings = append(findings, scanner.Finding{
+						ID:          scanner.GenerateFindingID("shell_rc", location, "suspicious function definition"),
+						Scanner:     "shell_rc",
+						Severity:    scanner.SevHigh,
+						Title:       "Suspicious function definition in shell RC file",
+						Detail:      "A shell function contains curl, wget, or nc, which may establish network connections or download/execute payloads when called.",
+						Evidence:    strings.TrimSpace(body),
+						Location:    location,
+						Remediation: "Review and remove the suspicious function from the RC file.",
+					})
+				}
+				inFunction = false
+				functionBody.Reset()
+			}
+		}
+
+		// Apply pattern-based checks.
 		for _, p := range shellRCPatterns {
 			if p.re.MatchString(trimmed) {
 				location := fmt.Sprintf("%s:%d", path, lineNum)
@@ -168,7 +222,44 @@ func scanRCFile(path string) ([]scanner.Finding, error) {
 					Location:    location,
 					Remediation: p.remediation,
 				})
-				// One finding per line per pattern; continue checking other patterns.
+			}
+		}
+
+		// Detect long base64 strings (without eval — eval+base64 caught above).
+		if !strings.Contains(strings.ToLower(trimmed), "eval") {
+			if m := reLongBase64.FindString(trimmed); m != "" {
+				location := fmt.Sprintf("%s:%d", path, lineNum)
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID("shell_rc", location, "long base64 string"),
+					Scanner:     "shell_rc",
+					Severity:    scanner.SevMedium,
+					Title:       "Long base64 string in shell RC file",
+					Detail:      "A long base64-encoded string was found in a shell RC file. This may be obfuscated data or a payload.",
+					Evidence:    trimmed,
+					Location:    location,
+					Remediation: "Review the base64 string and remove it if it is not required.",
+				})
+			}
+		}
+
+		// Follow source/. commands (one level deep).
+		if depth < maxSourceDepth {
+			if m := reSourceCommand.FindStringSubmatch(trimmed); len(m) == 2 {
+				sourcedPath := m[1]
+				// Expand ~ to home directory.
+				if strings.HasPrefix(sourcedPath, "~/") {
+					if home, err := os.UserHomeDir(); err == nil {
+						sourcedPath = filepath.Join(home, sourcedPath[2:])
+					}
+				}
+				// Only follow absolute paths or paths relative to the RC file's dir.
+				if !filepath.IsAbs(sourcedPath) {
+					sourcedPath = filepath.Join(filepath.Dir(path), sourcedPath)
+				}
+				if _, statErr := os.Stat(sourcedPath); statErr == nil {
+					sourced, _ := scanRCFileDepth(sourcedPath, depth+1)
+					findings = append(findings, sourced...)
+				}
 			}
 		}
 	}

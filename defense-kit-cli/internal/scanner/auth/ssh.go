@@ -19,11 +19,15 @@ const sshdConfigPath = "/etc/ssh/sshd_config"
 // It is overridable for testing.
 const defaultHomesGlobPattern = "/home/*"
 
+// suspiciousProxyCommands lists tools that indicate a suspicious ProxyCommand.
+var suspiciousProxyCommands = []string{"curl", "wget", "nc"}
+
 // SSHScanner checks SSH daemon configuration and authorized_keys files for
 // weak or dangerous settings.
 type SSHScanner struct {
-	configPath       string
-	homesGlobPattern string
+	configPath        string
+	homesGlobPattern  string
+	sshClientConfPath string // overridable for testing; empty means use default glob
 }
 
 // NewSSHScanner creates a new SSHScanner with production defaults.
@@ -53,6 +57,16 @@ func NewSSHScannerWithHomesDir(configPath, homeDir string) *SSHScanner {
 	}
 }
 
+// NewSSHScannerWithSSHClientConf creates an SSHScanner with a specific
+// ~/.ssh/config path to scan. Intended for testing.
+func NewSSHScannerWithSSHClientConf(configPath, sshClientConfPath string) *SSHScanner {
+	return &SSHScanner{
+		configPath:        configPath,
+		homesGlobPattern:  defaultHomesGlobPattern,
+		sshClientConfPath: sshClientConfPath,
+	}
+}
+
 func (s *SSHScanner) Name() string            { return "ssh" }
 func (s *SSHScanner) Category() string        { return "auth" }
 func (s *SSHScanner) RequiresRoot() bool      { return true }
@@ -60,7 +74,7 @@ func (s *SSHScanner) RequiredTools() []string { return nil }
 func (s *SSHScanner) OptionalTools() []string { return []string{"ssh-audit"} }
 func (s *SSHScanner) Available() bool         { return true }
 func (s *SSHScanner) Description() string {
-	return "Checks /etc/ssh/sshd_config for weak settings (PermitRootLogin, PasswordAuthentication, MaxAuthTries, PermitEmptyPasswords) and authorized_keys files for world-readable permissions."
+	return "Checks /etc/ssh/sshd_config for weak settings (PermitRootLogin, PasswordAuthentication, MaxAuthTries, PermitEmptyPasswords, AllowTcpForwarding, X11Forwarding, GatewayPorts, PermitTunnel), authorized_keys files for world-readable permissions, and ~/.ssh/config for suspicious ProxyCommand entries."
 }
 
 // Scan runs all SSH checks and returns the collected findings.
@@ -110,6 +124,7 @@ func (s *SSHScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]scan
 	}
 
 	addFindings(s.checkAuthorizedKeys())
+	addFindings(s.checkSSHClientConfig())
 
 	return findings, nil
 }
@@ -206,6 +221,62 @@ func (s *SSHScanner) checkSshdConfig(path string) ([]scanner.Finding, error) {
 					},
 				})
 			}
+
+		case "allowtcpforwarding":
+			if value == "yes" {
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID(s.Name(), path, "AllowTcpForwarding yes"),
+					Scanner:     s.Name(),
+					Severity:    scanner.SevMedium,
+					Title:       "AllowTcpForwarding is enabled",
+					Detail:      "AllowTcpForwarding allows users to create SSH tunnels, which can be used for tunnel pivoting to bypass network controls.",
+					Evidence:    line,
+					Location:    path,
+					Remediation: "Set 'AllowTcpForwarding no' in sshd_config unless TCP forwarding is explicitly required.",
+				})
+			}
+
+		case "x11forwarding":
+			if value == "yes" {
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID(s.Name(), path, "X11Forwarding yes"),
+					Scanner:     s.Name(),
+					Severity:    scanner.SevMedium,
+					Title:       "X11Forwarding is enabled",
+					Detail:      "X11Forwarding can expose the local X11 display to the remote host, enabling X11 session hijacking.",
+					Evidence:    line,
+					Location:    path,
+					Remediation: "Set 'X11Forwarding no' in sshd_config unless X11 forwarding is explicitly required.",
+				})
+			}
+
+		case "gatewayports":
+			if value == "yes" {
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID(s.Name(), path, "GatewayPorts yes"),
+					Scanner:     s.Name(),
+					Severity:    scanner.SevHigh,
+					Title:       "GatewayPorts is enabled",
+					Detail:      "GatewayPorts allows remote hosts to connect to ports forwarded for the client, enabling remote port forwarding accessible from the internet.",
+					Evidence:    line,
+					Location:    path,
+					Remediation: "Set 'GatewayPorts no' in sshd_config.",
+				})
+			}
+
+		case "permittunnel":
+			if value == "yes" {
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID(s.Name(), path, "PermitTunnel yes"),
+					Scanner:     s.Name(),
+					Severity:    scanner.SevHigh,
+					Title:       "PermitTunnel is enabled",
+					Detail:      "PermitTunnel allows VPN-like tunneling through SSH (tun device forwarding), which can be used to bypass network segmentation.",
+					Evidence:    line,
+					Location:    path,
+					Remediation: "Set 'PermitTunnel no' in sshd_config.",
+				})
+			}
 		}
 	}
 
@@ -284,6 +355,88 @@ func (s *SSHScanner) checkAuthorizedKeys() []scanner.Finding {
 		}
 	}
 
+	return findings
+}
+
+// checkSSHClientConfig scans ~/.ssh/config (and any per-user overrides) for
+// ProxyCommand entries that use suspicious network tools.
+func (s *SSHScanner) checkSSHClientConfig() []scanner.Finding {
+	var paths []string
+
+	if s.sshClientConfPath != "" {
+		// Testing override: scan a single explicit path.
+		paths = []string{s.sshClientConfPath}
+	} else {
+		// Production: scan every user's ~/.ssh/config.
+		homeDirs, err := filepath.Glob(s.homesGlobPattern)
+		if err != nil {
+			homeDirs = nil
+		}
+		// Also include root.
+		homeDirs = append(homeDirs, "/root")
+		for _, homeDir := range homeDirs {
+			p := filepath.Join(homeDir, ".ssh", "config")
+			if _, err := os.Stat(p); err == nil {
+				paths = append(paths, p)
+			}
+		}
+	}
+
+	var findings []scanner.Finding
+	for _, path := range paths {
+		ff := scanSSHClientConfFile(s.Name(), path)
+		findings = append(findings, ff...)
+	}
+	return findings
+}
+
+// scanSSHClientConfFile checks a single ssh client config file for suspicious
+// ProxyCommand directives.
+func scanSSHClientConfFile(scannerName, path string) []scanner.Finding {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var findings []scanner.Finding
+	lineNum := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lineNum++
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		if !strings.EqualFold(fields[0], "ProxyCommand") {
+			continue
+		}
+
+		// Check the ProxyCommand value for suspicious tools.
+		rest := strings.ToLower(strings.Join(fields[1:], " "))
+		for _, tool := range suspiciousProxyCommands {
+			if strings.Contains(rest, tool) {
+				location := fmt.Sprintf("%s:%d", path, lineNum)
+				findings = append(findings, scanner.Finding{
+					ID:          scanner.GenerateFindingID(scannerName, location, "suspicious ProxyCommand"),
+					Scanner:     scannerName,
+					Severity:    scanner.SevHigh,
+					Title:       "Suspicious ProxyCommand in SSH client config",
+					Detail:      fmt.Sprintf("ProxyCommand contains %q, which may be used to tunnel traffic through an untrusted host or exfiltrate credentials.", tool),
+					Evidence:    line,
+					Location:    location,
+					Remediation: "Review the ProxyCommand entry and ensure it only routes through trusted hosts.",
+				})
+				break
+			}
+		}
+	}
 	return findings
 }
 

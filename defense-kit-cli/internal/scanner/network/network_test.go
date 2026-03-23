@@ -258,12 +258,86 @@ func TestDNSScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not error; findings may or may not be present depending on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
 	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+}
+
+// TestDNSScanner_DetectsRogueResolver verifies that a synthetic resolv.conf
+// containing an unknown nameserver produces a HIGH finding.
+func TestDNSScanner_DetectsRogueResolver(t *testing.T) {
+	dir := t.TempDir()
+	resolvConf := filepath.Join(dir, "resolv.conf")
+	content := "nameserver 192.168.100.99\n"
+	if err := os.WriteFile(resolvConf, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write resolv.conf: %v", err)
+	}
+
+	findings := network.ParseResolvConf(resolvConf)
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for rogue resolver, got none")
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Scanner == "dns" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a HIGH finding from dns scanner, got: %+v", findings)
+	}
+}
+
+// TestDNSScanner_NoFindingsForKnownGoodResolvers verifies that well-known public
+// DNS servers do not produce findings.
+func TestDNSScanner_NoFindingsForKnownGoodResolvers(t *testing.T) {
+	dir := t.TempDir()
+	resolvConf := filepath.Join(dir, "resolv.conf")
+	content := "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"
+	if err := os.WriteFile(resolvConf, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write resolv.conf: %v", err)
+	}
+
+	findings := network.ParseResolvConf(resolvConf)
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh {
+			t.Errorf("unexpected HIGH finding for known-good resolvers: %+v", f)
+		}
+	}
+}
+
+// TestDNSScanner_DetectsMultipleDifferentResolvers verifies that multiple
+// differing nameservers produce a MEDIUM finding.
+func TestDNSScanner_DetectsMultipleDifferentResolvers(t *testing.T) {
+	dir := t.TempDir()
+	resolvConf := filepath.Join(dir, "resolv.conf")
+	// Two different unknown nameservers → rogue HIGH + multiple MEDIUM.
+	content := "nameserver 10.0.0.1\nnameserver 10.0.0.2\n"
+	if err := os.WriteFile(resolvConf, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write resolv.conf: %v", err)
+	}
+
+	findings := network.ParseResolvConf(resolvConf)
+	hasMedium := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium {
+			hasMedium = true
+		}
+	}
+	if !hasMedium {
+		t.Errorf("expected a MEDIUM finding for multiple differing resolvers, got: %+v", findings)
 	}
 }
 
@@ -286,12 +360,61 @@ func TestFirewallScanner_Interface(t *testing.T) {
 		t.Error("Description() should not be empty")
 	}
 
-	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	// Scan must not error; findings depend on environment.
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
 	if err != nil {
 		t.Errorf("Scan returned unexpected error: %v", err)
 	}
-	if findings != nil {
-		t.Errorf("stub Scan() should return nil findings, got %v", findings)
+}
+
+// TestFirewallScanner_DetectsForwardAccept verifies that iptables output with
+// a FORWARD ACCEPT policy produces a HIGH finding.
+func TestFirewallScanner_DetectsForwardAccept(t *testing.T) {
+	output := `Chain INPUT (policy DROP)
+target     prot opt source               destination
+
+Chain FORWARD (policy ACCEPT)
+target     prot opt source               destination
+
+Chain OUTPUT (policy ACCEPT)
+target     prot opt source               destination
+`
+	findings := network.ParseIPTablesOutput(output, "test-iptables")
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding for FORWARD ACCEPT, got none")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && f.Scanner == "firewall" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a HIGH finding for FORWARD ACCEPT, got: %+v", findings)
+	}
+}
+
+// TestFirewallScanner_NoFindingForForwardDrop verifies that a FORWARD DROP
+// policy does not produce a finding.
+func TestFirewallScanner_NoFindingForForwardDrop(t *testing.T) {
+	output := `Chain INPUT (policy DROP)
+target     prot opt source               destination
+
+Chain FORWARD (policy DROP)
+target     prot opt source               destination
+
+Chain OUTPUT (policy ACCEPT)
+target     prot opt source               destination
+`
+	findings := network.ParseIPTablesOutput(output, "test-iptables")
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for FORWARD DROP, got %d: %+v", len(findings), findings)
 	}
 }
 
