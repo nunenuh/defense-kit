@@ -140,14 +140,26 @@ func TestLogsScanner_Interface(t *testing.T) {
 	}
 }
 
-func TestLogsScanner_StubReturnsNoFindings(t *testing.T) {
+func TestLogsScanner_Scan_DoesNotPanic(t *testing.T) {
 	s := system.NewLogsScanner()
 	findings, err := s.Scan(context.Background(), defaultOpts())
+	// err is acceptable (e.g., no /var/log/auth.log on this host).
 	if err != nil {
-		t.Fatalf("Scan returned error: %v", err)
+		t.Logf("Scan returned error (may be expected in test environment): %v", err)
 	}
-	if len(findings) != 0 {
-		t.Errorf("stub Scan should return 0 findings, got %d", len(findings))
+	for _, f := range findings {
+		if f.ID == "" {
+			t.Errorf("finding has empty ID: %+v", f)
+		}
+		if f.Scanner == "" {
+			t.Errorf("finding has empty Scanner: %+v", f)
+		}
+		if f.Title == "" {
+			t.Errorf("finding has empty Title: %+v", f)
+		}
+		if f.Severity < scanner.SevLow || f.Severity > scanner.SevCritical {
+			t.Errorf("finding has invalid Severity %d: %+v", f.Severity, f)
+		}
 	}
 }
 
