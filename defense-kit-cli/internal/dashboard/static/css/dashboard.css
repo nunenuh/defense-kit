@@ -1,0 +1,549 @@
+/* defense-kit dashboard — dark theme */
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+:root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --border:    #30363d;
+    --text:      #c9d1d9;
+    --text-muted:#8b949e;
+    --text-dim:  #6e7681;
+    --link:      #58a6ff;
+    --critical:  #f85149;
+    --high:      #f0883e;
+    --medium:    #d29922;
+    --low:       #58a6ff;
+    --mono:      'SF Mono', 'Fira Code', 'Fira Mono', 'Cascadia Code', monospace;
+    --sidebar-w: 220px;
+}
+
+/* ── Layout ────────────────────────────────────────────────── */
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    display: flex;
+    min-height: 100vh;
+}
+
+.sidebar {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    overflow-y: auto;
+}
+
+.content {
+    margin-left: var(--sidebar-w);
+    flex: 1;
+    padding: 32px;
+    max-width: 1200px;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────── */
+
+.logo {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    padding: 0 20px 24px;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+}
+
+.logo::before {
+    content: '🛡 ';
+}
+
+.nav-item {
+    display: block;
+    padding: 10px 20px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 14px;
+    transition: color 0.15s, background 0.15s;
+    border-left: 3px solid transparent;
+}
+
+.nav-item:hover {
+    color: var(--text);
+    background: rgba(48, 54, 61, 0.4);
+}
+
+.nav-item.active {
+    color: var(--link);
+    background: rgba(88, 166, 255, 0.08);
+    border-left-color: var(--link);
+}
+
+/* ── Page Header ───────────────────────────────────────────── */
+
+.page-header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+}
+
+.page-header h1 {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.host {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.last-scan {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-left: auto;
+}
+
+/* ── Severity Cards (summary bar) ──────────────────────────── */
+
+.severity-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 28px;
+}
+
+.severity-cards .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    position: relative;
+    overflow: hidden;
+}
+
+.severity-cards .card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+}
+
+.severity-cards .card.critical::before { background: var(--critical); }
+.severity-cards .card.high::before     { background: var(--high); }
+.severity-cards .card.medium::before   { background: var(--medium); }
+.severity-cards .card.low::before      { background: var(--low); }
+
+.severity-cards .card .count {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.severity-cards .card.critical .count { color: var(--critical); }
+.severity-cards .card.high .count     { color: var(--high); }
+.severity-cards .card.medium .count   { color: var(--medium); }
+.severity-cards .card.low .count      { color: var(--low); }
+
+.severity-cards .card .label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+
+/* ── Generic Card ──────────────────────────────────────────── */
+
+.card-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 24px;
+    overflow: hidden;
+}
+
+.card-section-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.card-section-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.card-section-body {
+    padding: 20px;
+}
+
+/* ── Tables ────────────────────────────────────────────────── */
+
+.recent-findings,
+.table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 24px;
+}
+
+.recent-findings h2,
+.table-wrap h2 {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+thead tr {
+    background: rgba(48, 54, 61, 0.5);
+}
+
+th {
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    border-bottom: 1px solid var(--border);
+}
+
+td {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.6);
+    vertical-align: top;
+}
+
+tbody tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr:nth-child(even) {
+    background: rgba(22, 27, 34, 0.6);
+}
+
+tbody tr:hover {
+    background: rgba(48, 54, 61, 0.35);
+}
+
+/* ── Severity Badges ───────────────────────────────────────── */
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.badge.critical, .badge.CRITICAL {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--critical);
+    border: 1px solid rgba(248, 81, 73, 0.4);
+}
+
+.badge.high, .badge.HIGH {
+    background: rgba(240, 136, 62, 0.15);
+    color: var(--high);
+    border: 1px solid rgba(240, 136, 62, 0.4);
+}
+
+.badge.medium, .badge.MEDIUM {
+    background: rgba(210, 153, 34, 0.15);
+    color: var(--medium);
+    border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.badge.low, .badge.LOW {
+    background: rgba(88, 166, 255, 0.12);
+    color: var(--low);
+    border: 1px solid rgba(88, 166, 255, 0.3);
+}
+
+.badge.ok, .badge.pass {
+    background: rgba(63, 185, 80, 0.12);
+    color: #3fb950;
+    border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+.badge.missing, .badge.fail {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--critical);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+/* ── Mono / Evidence ───────────────────────────────────────── */
+
+.mono {
+    font-family: var(--mono);
+    font-size: 12px;
+}
+
+pre.evidence {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-top: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-muted);
+    max-height: 160px;
+    overflow-y: auto;
+}
+
+/* ── Buttons ───────────────────────────────────────────────── */
+
+button,
+.btn {
+    display: inline-block;
+    padding: 8px 18px;
+    background: rgba(88, 166, 255, 0.1);
+    color: var(--link);
+    border: 1px solid rgba(88, 166, 255, 0.4);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    text-decoration: none;
+}
+
+button:hover,
+.btn:hover {
+    background: rgba(88, 166, 255, 0.2);
+    border-color: rgba(88, 166, 255, 0.7);
+}
+
+button.danger,
+.btn.danger {
+    background: rgba(248, 81, 73, 0.1);
+    color: var(--critical);
+    border-color: rgba(248, 81, 73, 0.4);
+}
+
+button.danger:hover,
+.btn.danger:hover {
+    background: rgba(248, 81, 73, 0.2);
+    border-color: rgba(248, 81, 73, 0.7);
+}
+
+/* ── Actions Bar ───────────────────────────────────────────── */
+
+.actions {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+#scan-status {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* ── Filters ───────────────────────────────────────────────── */
+
+.filters {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.filters label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-right: 4px;
+}
+
+select,
+input[type="text"],
+input[type="search"] {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+select:focus,
+input[type="text"]:focus,
+input[type="search"]:focus {
+    border-color: var(--link);
+}
+
+select option {
+    background: var(--surface);
+}
+
+/* ── Expandable rows ───────────────────────────────────────── */
+
+.detail-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.detail-content {
+    padding: 14px 16px 14px 40px;
+    background: rgba(13, 17, 23, 0.6);
+}
+
+.detail-content .field-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin-bottom: 4px;
+    margin-top: 12px;
+}
+
+.detail-content .field-label:first-child {
+    margin-top: 0;
+}
+
+.detail-content .remediation {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+tr.finding-row {
+    cursor: pointer;
+}
+
+tr.finding-row td:first-child::before {
+    content: '▶ ';
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 4px;
+}
+
+tr.finding-row.open td:first-child::before {
+    content: '▼ ';
+}
+
+/* ── Chart Container ───────────────────────────────────────── */
+
+.chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+}
+
+.chart-container h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: var(--text);
+}
+
+/* ── Status indicators ─────────────────────────────────────── */
+
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.status-dot.available  { background: #3fb950; }
+.status-dot.missing    { background: var(--critical); }
+.status-dot.installed  { background: #3fb950; }
+
+/* ── Responsive ────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .severity-cards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 700px) {
+    .sidebar {
+        width: 60px;
+        padding: 16px 0;
+    }
+
+    .logo {
+        font-size: 0;
+        padding: 0 0 16px;
+        text-align: center;
+    }
+
+    .logo::before {
+        font-size: 20px;
+    }
+
+    .nav-item span {
+        display: none;
+    }
+
+    .content {
+        margin-left: 60px;
+        padding: 16px;
+    }
+
+    .severity-cards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 480px) {
+    .severity-cards {
+        grid-template-columns: 1fr 1fr;
+    }
+}

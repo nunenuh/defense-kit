@@ -16,6 +16,7 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/baseline"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/comply"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/config"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/dashboard"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/monitor"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
@@ -57,6 +58,7 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newMonitorCmd())
 	root.AddCommand(newScheduleCmd())
 	root.AddCommand(newComplyCmd())
+	root.AddCommand(newDashboardCmd())
 
 	return root
 }
@@ -1090,4 +1092,72 @@ func runComply(cfgPath string, frameworkStr string) error {
 	fmt.Fprint(os.Stdout, comply.FormatReport(compResult))
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard command
+// ---------------------------------------------------------------------------
+
+func newDashboardCmd() *cobra.Command {
+	var (
+		port     int
+		openBrowser bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Start local security dashboard",
+		Long: `dashboard starts a local HTTP server that provides a web-based view of
+scan history, findings, trends, and scanner status.
+
+The server listens on 127.0.0.1 (localhost only) and never accepts external
+connections.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDashboard(port, openBrowser)
+		},
+	}
+
+	cmd.Flags().IntVar(&port, "port", 8080, "HTTP port")
+	cmd.Flags().BoolVar(&openBrowser, "open", false, "open browser automatically")
+
+	return cmd
+}
+
+func runDashboard(port int, openBrowser bool) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	dbFilePath := filepath.Join(home, ".defense-kit", "dashboard.db")
+
+	db, err := dashboard.OpenDB(dbFilePath)
+	if err != nil {
+		return fmt.Errorf("open dashboard db: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		return fmt.Errorf("migrate dashboard db: %w", err)
+	}
+
+	reg := defaultRegistry()
+	srv := dashboard.NewServer(db, reg, port)
+
+	url := fmt.Sprintf("http://localhost:%d", port)
+	fmt.Fprintf(os.Stdout, "Dashboard at %s\n", url)
+
+	if openBrowser {
+		// Best-effort: open the default browser. Ignore errors (e.g. headless env).
+		_ = openURL(url)
+	}
+
+	return srv.Start()
+}
+
+// openURL attempts to open url in the system default browser.
+func openURL(url string) error {
+	// Use xdg-open on Linux; ignore missing tool errors.
+	runner := tools.NewRunner()
+	_, err := runner.Run(context.Background(), "xdg-open", []string{url})
+	return err
 }
