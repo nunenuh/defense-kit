@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/hardener"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
@@ -302,6 +306,441 @@ func (s *Server) handleAPINotificationRead(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleAPIScanStatus returns the current status of a scan by ID.
+// GET /api/scan/status/{id}
+func (s *Server) handleAPIScanStatus(w http.ResponseWriter, r *http.Request) {
+	prefix := "/api/scan/status/"
+	id := strings.TrimPrefix(r.URL.Path, prefix)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "scan id required")
+		return
+	}
+
+	rec, err := s.db.GetScan(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "scan not found")
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"scan_id":  rec.ID,
+		"status":   rec.Status,
+		"total":    rec.Total,
+		"critical": rec.Critical,
+		"high":     rec.High,
+		"medium":   rec.Medium,
+		"low":      rec.Low,
+	})
+}
+
+// handleAPIHardenPreview runs a scan, finds fixable findings, and returns a preview.
+// POST /api/harden/preview
+func (s *Server) handleAPIHardenPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	eng := scanner.NewEngine(s.registry)
+	opts := scanner.ScanOptions{
+		Timeout:     60 * time.Second,
+		Concurrency: 4,
+		ToolRunner:  tools.NewRunner(),
+	}
+	results := eng.Run(context.Background(), opts)
+
+	var allFindings []scanner.Finding
+	for _, res := range results {
+		allFindings = append(allFindings, res.Findings...)
+	}
+
+	reg := hardener.NewHardenerRegistry()
+	fixable := reg.FixableFindings(allFindings)
+
+	writeJSON(w, map[string]interface{}{
+		"fixable": fixable,
+		"total":   len(fixable),
+	})
+}
+
+// handleAPIBaselineUpdate runs a scan, saves as the current baseline.
+// POST /api/baseline/update
+func (s *Server) handleAPIBaselineUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	eng := scanner.NewEngine(s.registry)
+	opts := scanner.ScanOptions{
+		Timeout:     60 * time.Second,
+		Concurrency: 4,
+		ToolRunner:  tools.NewRunner(),
+	}
+	results := eng.Run(context.Background(), opts)
+
+	var allFindings []scanner.Finding
+	for _, res := range results {
+		allFindings = append(allFindings, res.Findings...)
+	}
+
+	// Save as a regular scan first so findings are stored.
+	scanID := generateScanID()
+	host, _ := os.Hostname()
+	rec := ScanRecord{
+		ID:        scanID,
+		Timestamp: time.Now().UTC(),
+		Host:      host,
+		Total:     len(allFindings),
+		Status:    "completed",
+	}
+	for _, f := range allFindings {
+		switch f.Severity {
+		case scanner.SevCritical:
+			rec.Critical++
+		case scanner.SevHigh:
+			rec.High++
+		case scanner.SevMedium:
+			rec.Medium++
+		default:
+			rec.Low++
+		}
+	}
+	if err := s.db.SaveScan(rec); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.db.SaveFindings(scanID, allFindings); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.db.SaveBaseline(scanID, len(allFindings)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"status":        "ok",
+		"scan_id":       scanID,
+		"finding_count": len(allFindings),
+	})
+}
+
+// handleAPIBaselineStatus returns current baseline info.
+// GET /api/baseline/status
+func (s *Server) handleAPIBaselineStatus(w http.ResponseWriter, r *http.Request) {
+	b, err := s.db.GetBaseline()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if b == nil {
+		writeJSON(w, map[string]interface{}{
+			"exists": false,
+		})
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"exists":        true,
+		"scan_id":       b.ScanID,
+		"finding_count": b.FindingCount,
+		"last_updated":  b.CreatedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// scheduleEnableRequest is the body for POST /api/schedule/enable.
+type scheduleEnableRequest struct {
+	Interval string `json:"interval"`
+	Mode     string `json:"mode"`
+}
+
+// handleAPIScheduleEnable enables the background schedule.
+// POST /api/schedule/enable
+func (s *Server) handleAPIScheduleEnable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	var req scheduleEnableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Interval == "" {
+		req.Interval = "6h"
+	}
+	if req.Mode == "" {
+		req.Mode = "quick"
+	}
+
+	cfg := ScheduleConfig{
+		Enabled:   true,
+		Interval:  req.Interval,
+		Mode:      req.Mode,
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.db.SaveScheduleConfig(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Apply to running background scanner if present.
+	if s.bgScanner != nil {
+		dur, err := parseDuration(req.Interval)
+		if err == nil {
+			s.bgScanner.SetInterval(dur)
+		}
+		if !s.bgScanner.IsRunning() {
+			s.bgScanner.Start()
+		}
+	}
+
+	writeJSON(w, map[string]string{"status": "enabled"})
+}
+
+// handleAPIScheduleDisable disables the background schedule.
+// POST /api/schedule/disable
+func (s *Server) handleAPIScheduleDisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	cfg := ScheduleConfig{
+		Enabled:   false,
+		Interval:  "6h",
+		Mode:      "quick",
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.db.SaveScheduleConfig(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if s.bgScanner != nil && s.bgScanner.IsRunning() {
+		s.bgScanner.Stop()
+	}
+
+	writeJSON(w, map[string]string{"status": "disabled"})
+}
+
+// handleAPIScheduleStatus returns the current schedule status.
+// GET /api/schedule/status
+func (s *Server) handleAPIScheduleStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.db.GetScheduleConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	running := false
+	if s.bgScanner != nil {
+		running = s.bgScanner.IsRunning()
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"enabled":    cfg.Enabled,
+		"interval":   cfg.Interval,
+		"mode":       cfg.Mode,
+		"running":    running,
+		"updated_at": cfg.UpdatedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleAPINotifications returns unread notifications.
+// GET /api/notifications
+func (s *Server) handleAPINotifications(w http.ResponseWriter, r *http.Request) {
+	notifs, err := s.db.GetNotifications(true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"notifications": notifs,
+		"total":         len(notifs),
+	})
+}
+
+// handleAPINotificationsCount returns count of unread notifications.
+// GET /api/notifications/count
+func (s *Server) handleAPINotificationsCount(w http.ResponseWriter, r *http.Request) {
+	notifs, err := s.db.GetNotifications(true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]int{"unread": len(notifs)})
+}
+
+// DashboardConfig is the structure persisted to ~/.config/defense-kit/config.yml.
+type DashboardConfig struct {
+	Concurrency    int      `yaml:"concurrency"    json:"concurrency"`
+	TimeoutSeconds int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	ExcludePaths   []string `yaml:"exclude_paths"  json:"exclude_paths"`
+	AlertChannels  []string `yaml:"alert_channels" json:"alert_channels"`
+}
+
+// configFilePath returns the path to the config YAML.
+func configFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".config", "defense-kit", "config.yml")
+	}
+	return filepath.Join(home, ".config", "defense-kit", "config.yml")
+}
+
+// loadConfig reads the config file; returns defaults if file is absent.
+func loadConfig() (DashboardConfig, error) {
+	cfg := DashboardConfig{
+		Concurrency:    4,
+		TimeoutSeconds: 60,
+		ExcludePaths:   []string{},
+		AlertChannels:  []string{},
+	}
+	data, err := os.ReadFile(configFilePath())
+	if os.IsNotExist(err) {
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// saveConfig writes cfg to the config YAML file.
+func saveConfig(cfg DashboardConfig) error {
+	path := configFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// handleAPISettings dispatches GET /api/settings and POST /api/settings.
+func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleAPIGetSettings(w, r)
+	case http.MethodPost:
+		s.handleAPIPostSettings(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "GET or POST required")
+	}
+}
+
+// handleAPIGetSettings returns the current config.
+// GET /api/settings
+func (s *Server) handleAPIGetSettings(w http.ResponseWriter, r *http.Request) {
+	cfg, err := loadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, cfg)
+}
+
+// handleAPIPostSettings applies a partial or full config update.
+// POST /api/settings
+func (s *Server) handleAPIPostSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	current, err := loadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read config: "+err.Error())
+		return
+	}
+
+	// Decode partial update — only set fields that are present.
+	var patch DashboardConfig
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if patch.Concurrency > 0 {
+		current.Concurrency = patch.Concurrency
+	}
+	if patch.TimeoutSeconds > 0 {
+		current.TimeoutSeconds = patch.TimeoutSeconds
+	}
+	if patch.ExcludePaths != nil {
+		current.ExcludePaths = patch.ExcludePaths
+	}
+	if patch.AlertChannels != nil {
+		current.AlertChannels = patch.AlertChannels
+	}
+
+	if err := saveConfig(current); err != nil {
+		writeError(w, http.StatusInternalServerError, "save config: "+err.Error())
+		return
+	}
+	writeJSON(w, current)
+}
+
+// handleAPIExport exports findings for a scan as CSV.
+// GET /api/export/{scan_id}?format=csv
+func (s *Server) handleAPIExport(w http.ResponseWriter, r *http.Request) {
+	prefix := "/api/export/"
+	scanID := strings.TrimPrefix(r.URL.Path, prefix)
+	if scanID == "" {
+		writeError(w, http.StatusBadRequest, "scan id required")
+		return
+	}
+
+	// Verify the scan exists.
+	if _, err := s.db.GetScan(scanID); err != nil {
+		writeError(w, http.StatusNotFound, "scan not found")
+		return
+	}
+
+	findings, err := s.db.GetFindings(scanID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	filename := fmt.Sprintf("defense-kit-%s.csv", scanID)
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"id", "scanner", "severity", "title", "detail", "evidence", "location", "remediation", "can_auto_fix"})
+	for _, f := range findings {
+		canFix := "false"
+		if f.CanAutoFix {
+			canFix = "true"
+		}
+		_ = cw.Write([]string{
+			f.ID,
+			f.Scanner,
+			f.Severity.String(),
+			f.Title,
+			f.Detail,
+			f.Evidence,
+			f.Location,
+			f.Remediation,
+			canFix,
+		})
+	}
+	cw.Flush()
+}
+
+// parseDuration parses a duration string like "6h", "30m", "1h30m".
+// Falls back to time.ParseDuration for standard Go formats.
+func parseDuration(s string) (time.Duration, error) {
+	return time.ParseDuration(s)
 }
 
 // generateScanID creates a unique scan identifier using the current timestamp.
