@@ -3,9 +3,9 @@
 # defense-kit remote installer
 #
 # Install via:
-#   curl -sSL https://get.nunenuh.com/defense-kit | bash
-#   curl -sSL https://get.nunenuh.com/defense-kit | bash -s -- --with-tools
-#   wget -qO- https://get.nunenuh.com/defense-kit | bash
+#   curl -sSL https://get.nunenuh.me/defense-kit | bash
+#   curl -sSL https://get.nunenuh.me/defense-kit | bash -s -- --with-tools
+#   wget -qO- https://get.nunenuh.me/defense-kit | bash
 #
 # Options (pass after -- when piping):
 #   --prefix /path     Install to /path/bin (default: ~/.local)
@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "Usage: curl -sSL https://get.nunenuh.com/defense-kit | bash -s -- [OPTIONS]"
+            echo "Usage: curl -sSL https://get.nunenuh.me/defense-kit | bash -s -- [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --prefix PATH    Install to PATH/bin (default: ~/.local)"
