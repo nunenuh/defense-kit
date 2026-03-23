@@ -313,14 +313,314 @@ func TestUsersScanner_Interface(t *testing.T) {
 	}
 }
 
-func TestUsersScanner_StubReturnsNoFindings(t *testing.T) {
-	s := auth.NewUsersScanner()
+// ---------------------------------------------------------------------------
+// UsersScanner — helpers
+// ---------------------------------------------------------------------------
+
+// writeTempFile writes content to a named file inside a temp dir and returns
+// the absolute path.
+func writeTempFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write %s: %v", name, err)
+	}
+	return path
+}
+
+// newUsersScanner builds a UsersScanner pointing at the given temp files.
+// Any path that is empty string is replaced with a nonexistent file so the
+// scanner can handle missing optional data gracefully.
+func newUsersScanner(t *testing.T, passwd, shadow, sudoers, sudoersD, group string) *auth.UsersScanner {
+	t.Helper()
+	nonexistent := filepath.Join(t.TempDir(), "nonexistent")
+	if passwd == "" {
+		passwd = nonexistent
+	}
+	if shadow == "" {
+		shadow = nonexistent
+	}
+	if sudoers == "" {
+		sudoers = nonexistent
+	}
+	if group == "" {
+		group = nonexistent
+	}
+	return auth.NewUsersScannerWithPaths(passwd, shadow, sudoers, sudoersD, group)
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — UID 0 detection
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_UID0Backdoor_Critical(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd",
+		"root:x:0:0:root:/root:/bin/bash\n"+
+			"backdoor:x:0:0:evil:/home/backdoor:/bin/bash\n"+
+			"nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n")
+
+	s := newUsersScanner(t, passwd, "", "", "", "")
 	findings, err := s.Scan(context.Background(), defaultOpts())
 	if err != nil {
-		t.Fatalf("Scan returned error: %v", err)
+		t.Fatalf("Scan returned unexpected error: %v", err)
 	}
-	if len(findings) != 0 {
-		t.Errorf("stub Scan should return 0 findings, got %d", len(findings))
+
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, "backdoor") {
+			found = true
+			if f.Severity != scanner.SevCritical {
+				t.Errorf("UID 0 finding severity = %s, want CRITICAL", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for backdoor UID 0 account, got: %+v", findings)
+	}
+}
+
+func TestUsersScanner_RootUID0_NotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd",
+		"root:x:0:0:root:/root:/bin/bash\n")
+
+	s := newUsersScanner(t, passwd, "", "", "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	for _, f := range findings {
+		if strings.Contains(f.Title, "Non-root account with UID 0") {
+			t.Errorf("root account should not be flagged for UID 0, got: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — passwordless accounts
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_PasswordlessWithShell_High(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd",
+		"root:x:0:0:root:/root:/bin/bash\n"+
+			"ghost:x:1001:1001:Ghost User:/home/ghost:/bin/bash\n")
+	shadow := writeTempFile(t, dir, "shadow",
+		"root:$6$hash:19000:0:99999:7:::\n"+
+			"ghost::19000:0:99999:7:::\n") // empty password field
+
+	s := newUsersScanner(t, passwd, shadow, "", "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, "ghost") && strings.Contains(f.Title, "no password") {
+			found = true
+			if f.Severity != scanner.SevHigh {
+				t.Errorf("passwordless finding severity = %s, want HIGH", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for passwordless account 'ghost', got: %+v", findings)
+	}
+}
+
+func TestUsersScanner_PasswordlessNologin_NotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd",
+		"daemon:x:2:2:Daemon:/sbin:/usr/sbin/nologin\n")
+	shadow := writeTempFile(t, dir, "shadow",
+		"daemon::19000:0:99999:7:::\n") // empty password but nologin shell
+
+	s := newUsersScanner(t, passwd, shadow, "", "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	for _, f := range findings {
+		if strings.Contains(f.Title, "daemon") && strings.Contains(f.Title, "no password") {
+			t.Errorf("nologin account should not be flagged for no password, got: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — NOPASSWD sudoers detection
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_SudoersNOPASSWD_High(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd", "root:x:0:0:root:/root:/bin/bash\n")
+	sudoers := writeTempFile(t, dir, "sudoers",
+		"# /etc/sudoers\n"+
+			"root    ALL=(ALL:ALL) ALL\n"+
+			"deploy  ALL=(ALL) NOPASSWD: ALL\n")
+
+	s := newUsersScanner(t, passwd, "", sudoers, "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, "NOPASSWD") && strings.Contains(f.Title, "deploy") {
+			found = true
+			if f.Severity != scanner.SevHigh {
+				t.Errorf("NOPASSWD finding severity = %s, want HIGH", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for NOPASSWD deploy, got: %+v", findings)
+	}
+}
+
+func TestUsersScanner_SudoersNOPASSWD_InSubdir(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd", "root:x:0:0:root:/root:/bin/bash\n")
+	// No main sudoers file, but a drop-in file in sudoers.d
+	sudoersDDir := filepath.Join(dir, "sudoers.d")
+	if err := os.MkdirAll(sudoersDDir, 0o755); err != nil {
+		t.Fatalf("mkdir sudoers.d: %v", err)
+	}
+	writeTempFile(t, sudoersDDir, "ci-runner",
+		"ci ALL=(ALL) NOPASSWD: /usr/bin/docker\n")
+
+	nonexistent := filepath.Join(dir, "nonexistent")
+	s := auth.NewUsersScannerWithPaths(passwd, nonexistent, nonexistent, sudoersDDir, nonexistent)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, "NOPASSWD") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected NOPASSWD finding from sudoers.d drop-in, got: %+v", findings)
+	}
+}
+
+func TestUsersScanner_SudoersClean_NoFindings(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd", "root:x:0:0:root:/root:/bin/bash\n")
+	sudoers := writeTempFile(t, dir, "sudoers",
+		"root    ALL=(ALL:ALL) ALL\n"+
+			"%sudo   ALL=(ALL:ALL) ALL\n")
+
+	s := newUsersScanner(t, passwd, "", sudoers, "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	for _, f := range findings {
+		if strings.Contains(f.Title, "NOPASSWD") {
+			t.Errorf("clean sudoers should not produce NOPASSWD findings, got: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — privileged group membership
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_PrivilegedGroups_Low(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd", "root:x:0:0:root:/root:/bin/bash\n")
+	group := writeTempFile(t, dir, "group",
+		"sudo:x:27:alice,bob\n"+
+			"wheel:x:10:charlie\n"+
+			"nogroup:x:65534:\n")
+
+	s := newUsersScanner(t, passwd, "", "", "", group)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	foundSudo := false
+	foundWheel := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, `"sudo"`) {
+			foundSudo = true
+			if f.Severity != scanner.SevLow {
+				t.Errorf("sudo group finding severity = %s, want LOW", f.Severity)
+			}
+		}
+		if strings.Contains(f.Title, `"wheel"`) {
+			foundWheel = true
+		}
+	}
+	if !foundSudo {
+		t.Errorf("expected LOW finding for sudo group membership, got: %+v", findings)
+	}
+	if !foundWheel {
+		t.Errorf("expected LOW finding for wheel group membership, got: %+v", findings)
+	}
+}
+
+func TestUsersScanner_PrivilegedGroups_EmptyMembers_NotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd", "root:x:0:0:root:/root:/bin/bash\n")
+	group := writeTempFile(t, dir, "group",
+		"sudo:x:27:\n") // group exists but has no members
+
+	s := newUsersScanner(t, passwd, "", "", "", group)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	for _, f := range findings {
+		if strings.Contains(f.Title, `"sudo"`) {
+			t.Errorf("empty sudo group should not produce a finding, got: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — findings quality
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_FindingsHaveRequiredFields(t *testing.T) {
+	dir := t.TempDir()
+	passwd := writeTempFile(t, dir, "passwd",
+		"root:x:0:0:root:/root:/bin/bash\n"+
+			"evil:x:0:0:evil:/home/evil:/bin/bash\n")
+	sudoers := writeTempFile(t, dir, "sudoers",
+		"attacker  ALL=(ALL) NOPASSWD: ALL\n")
+
+	s := newUsersScanner(t, passwd, "", sudoers, "", "")
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+
+	for _, f := range findings {
+		if f.ID == "" {
+			t.Errorf("finding has empty ID: %+v", f)
+		}
+		if f.Scanner == "" {
+			t.Errorf("finding has empty Scanner: %+v", f)
+		}
+		if f.Title == "" {
+			t.Errorf("finding has empty Title: %+v", f)
+		}
 	}
 }
 
