@@ -130,13 +130,20 @@ info "Trying pre-built binary..."
 if curl -sSLf -o "${TMPDIR}/defense-kit.tar.gz" "${RELEASE_URL}" 2>/dev/null; then
     info "Extracting..."
     tar -xzf "${TMPDIR}/defense-kit.tar.gz" -C "${TMPDIR}"
+    # Archive may contain "defense-kit" or "defense-kit-{os}-{arch}"
+    EXTRACTED=""
     if [ -f "${TMPDIR}/${BINARY_NAME}" ]; then
+        EXTRACTED="${TMPDIR}/${BINARY_NAME}"
+    elif [ -f "${TMPDIR}/${BINARY_NAME}-${OS}-${ARCH}" ]; then
+        EXTRACTED="${TMPDIR}/${BINARY_NAME}-${OS}-${ARCH}"
+    fi
+    if [ -n "${EXTRACTED}" ]; then
         mkdir -p "${BIN_DIR}"
-        mv "${TMPDIR}/${BINARY_NAME}" "${BIN_DIR}/${BINARY_NAME}"
+        mv "${EXTRACTED}" "${BIN_DIR}/${BINARY_NAME}"
         chmod +x "${BIN_DIR}/${BINARY_NAME}"
         ok "Installed pre-built binary"
     else
-        fail "Binary not found in archive"
+        fail "Binary not found in archive (looked for ${BINARY_NAME} and ${BINARY_NAME}-${OS}-${ARCH})"
     fi
 else
     # Method 2: Build from source
