@@ -78,7 +78,7 @@ func (s *RootkitScanner) Name() string            { return "rootkit" }
 func (s *RootkitScanner) Category() string        { return "system" }
 func (s *RootkitScanner) RequiresRoot() bool      { return true }
 func (s *RootkitScanner) RequiredTools() []string { return nil }
-func (s *RootkitScanner) OptionalTools() []string { return []string{"rkhunter", "chkrootkit"} }
+func (s *RootkitScanner) OptionalTools() []string { return []string{"rkhunter", "chkrootkit", "clamav"} }
 func (s *RootkitScanner) Available() bool         { return true }
 func (s *RootkitScanner) Description() string {
 	return "Checks for rootkit indicators: suspicious kernel module names in /proc/modules, non-standard device files in /dev, and processes whose /proc/*/status PID count differs from the number of /proc/[0-9]* entries."
@@ -110,6 +110,18 @@ func (s *RootkitScanner) Scan(ctx context.Context, opts scanner.ScanOptions) ([]
 				addFindings(rkhunterFindings)
 			}
 		}
+	}
+
+	// Try ClamAV malware scan if available.
+	if opts.ToolRunner != nil && opts.ToolRunner.Available("clamscan") {
+		out, err := opts.ToolRunner.Run(ctx, "clamscan", []string{
+			"--recursive", "--infected", "--no-summary", "/home", "/tmp", "/var/tmp",
+		})
+		if len(out) > 0 {
+			clamFindings, _ := tools.ParseClamAVOutput(out)
+			addFindings(clamFindings)
+		}
+		_ = err // clamscan returns non-zero when infections found
 	}
 
 	// Always run native checks too.

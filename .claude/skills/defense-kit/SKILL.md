@@ -1,6 +1,6 @@
 ---
 name: defense-kit
-description: Defensive security toolkit — scan, harden, monitor, and comply for Linux endpoints. Go binary with 31 scanners, 17 external tool integrations, AI copilot recommendations.
+description: Defensive security toolkit — scan, harden, monitor, and comply for Linux endpoints. Go binary with 41 scanners, 17 external tool integrations, 20 defense playbooks, AI copilot recommendations.
 ---
 
 # Defense-Kit

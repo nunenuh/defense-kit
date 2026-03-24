@@ -244,3 +244,27 @@ func ParseSSHAuditJSON(data []byte) ([]scanner.Finding, error) {
 	}
 	return findings, nil
 }
+
+// --- ClamAV ---
+
+var clamavFoundRe = regexp.MustCompile(`^(.+):\s+(.+)\s+FOUND\s*$`)
+
+// ParseClamAVOutput parses clamscan output for infected file detections.
+func ParseClamAVOutput(data []byte) ([]scanner.Finding, error) {
+	var findings []scanner.Finding
+	for _, line := range strings.Split(string(data), "\n") {
+		if m := clamavFoundRe.FindStringSubmatch(line); len(m) > 2 {
+			findings = append(findings, scanner.Finding{
+				ID:          scanner.GenerateFindingID("rootkit", m[1], m[2]),
+				Scanner:     "rootkit",
+				Severity:    scanner.SevCritical,
+				Title:       fmt.Sprintf("Malware detected: %s", m[2]),
+				Detail:      "ClamAV identified this file as malicious",
+				Evidence:    line,
+				Location:    m[1],
+				Remediation: "Quarantine or delete the file, investigate how it arrived",
+			})
+		}
+	}
+	return findings, nil
+}
