@@ -2,11 +2,16 @@ package reporter_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/reporter"
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
@@ -251,6 +256,113 @@ func TestJSONReporterOutputPath(t *testing.T) {
 	expected := "/some/output/dir/dk-20240101-120000/findings.json"
 	if path != expected {
 		t.Errorf("expected path %q, got %q", expected, path)
+	}
+}
+
+func TestTerminalReporter_LowSeverityColor(t *testing.T) {
+	// A LOW severity finding exercises the default branch in severityColor.
+	low := makeFinding(scanner.SevLow, "Low Title", "/low/path", "low detail", "low ev", "low fix")
+	var buf bytes.Buffer
+	tr := reporter.NewTerminalReporter(&buf)
+	tr.Render(makeResults(low))
+	output := buf.String()
+	if !strings.Contains(output, "LOW") {
+		t.Errorf("expected 'LOW' in output, got:\n%s", output)
+	}
+}
+
+func TestSlackAlerter_MoreThan10Findings(t *testing.T) {
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received = body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Build 15 findings so the "...and N more" branch fires.
+	var findings []scanner.Finding
+	for i := 0; i < 15; i++ {
+		findings = append(findings, makeFinding(scanner.SevHigh, "Finding", "/path", "detail", "ev", "fix"))
+	}
+	a := reporter.NewSlackAlerter(srv.URL)
+	report := reporter.AlertReport{
+		Host:     "testhost",
+		ScanID:   "dk-many",
+		Time:     time.Now(),
+		Findings: findings,
+	}
+	if err := a.Send(context.Background(), report); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(received), "more findings") {
+		t.Errorf("expected '...and N more findings' in payload, got: %s", string(received))
+	}
+}
+
+func TestEmailAlerter_Name(t *testing.T) {
+	a := reporter.NewEmailAlerter("to@example.com", "from@example.com", "smtp.example.com", "587")
+	if a.Name() != "email" {
+		t.Errorf("expected Name()='email', got %q", a.Name())
+	}
+}
+
+func TestTerminalReporter_EmptyResults(t *testing.T) {
+	// Rendering with no scan results (and therefore no findings) should still
+	// produce a valid summary line and not panic.
+	var buf bytes.Buffer
+	tr := reporter.NewTerminalReporter(&buf)
+	tr.Render([]scanner.ScanResult{})
+
+	output := buf.String()
+	if !strings.Contains(output, "SCAN COMPLETE") {
+		t.Errorf("expected 'SCAN COMPLETE' in output for empty results, got:\n%s", output)
+	}
+	if !strings.Contains(output, "0 findings") {
+		t.Errorf("expected '0 findings' in output for empty results, got:\n%s", output)
+	}
+}
+
+func TestWebhookAlerter_NonSuccessResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	a := reporter.NewWebhookAlerter(srv.URL, "secret", false)
+	report := reporter.AlertReport{Host: "testhost", ScanID: "dk-wh-err", Time: time.Now()}
+	err := a.Send(context.Background(), report)
+	if err == nil {
+		t.Fatal("expected error for non-2xx webhook response, got nil")
+	}
+}
+
+func TestJSONReporter_WriteToReadOnlyDir(t *testing.T) {
+	// Use a path that cannot be created (file exists as a regular file, not dir).
+	tmpDir := t.TempDir()
+	// Create a file where we expect a directory — MkdirAll will fail.
+	blocker := filepath.Join(tmpDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("block"), 0o444); err != nil {
+		t.Fatalf("setup: could not create blocker file: %v", err)
+	}
+
+	// Try to write a report where outputDir = blocker (a file, not a dir).
+	// The scanID subdirectory creation will fail.
+	jr := reporter.NewJSONReporter(blocker)
+	_, err := jr.Write([]scanner.ScanResult{}, "testhost")
+	if err == nil {
+		t.Fatal("expected error when outputDir is a file, not a directory")
+	}
+}
+
+func TestCountBySeverity_EmptySlice(t *testing.T) {
+	counts := reporter.CountBySeverity([]scanner.Finding{})
+	if len(counts) != 0 {
+		t.Errorf("expected empty map for empty slice, got %v", counts)
+	}
+	// Accessing a key that was never set should return the zero value (0).
+	if counts[scanner.SevCritical] != 0 {
+		t.Errorf("expected 0 critical for empty slice, got %d", counts[scanner.SevCritical])
 	}
 }
 

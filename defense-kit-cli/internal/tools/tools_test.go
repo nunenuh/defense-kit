@@ -67,6 +67,29 @@ func TestAdd_And_Get(t *testing.T) {
 	}
 }
 
+func TestAdd_DuplicateReplaces(t *testing.T) {
+	r := NewToolRegistry()
+	r.Add(ToolDef{Name: "mytool", Binary: "mytool", Category: "system", Purpose: "original"})
+	r.Add(ToolDef{Name: "mytool", Binary: "mytool2", Category: "secrets", Purpose: "replaced"})
+
+	// Only one entry should exist.
+	all := r.All()
+	if len(all) != 1 {
+		t.Fatalf("expected 1 tool after duplicate add, got %d", len(all))
+	}
+
+	got, ok := r.Get("mytool")
+	if !ok {
+		t.Fatal("expected to find 'mytool' after replacement")
+	}
+	if got.Purpose != "replaced" {
+		t.Errorf("expected Purpose='replaced', got %q", got.Purpose)
+	}
+	if got.Category != "secrets" {
+		t.Errorf("expected Category='secrets', got %q", got.Category)
+	}
+}
+
 func TestGet_NotFound(t *testing.T) {
 	r := NewToolRegistry()
 	_, ok := r.Get("nonexistent")

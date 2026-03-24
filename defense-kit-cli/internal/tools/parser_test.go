@@ -263,6 +263,169 @@ func TestParseSSHAuditJSON_Empty(t *testing.T) {
 	}
 }
 
+// ── Additional edge-case tests ────────────────────────────────────────────────
+
+func TestParseGitleaksJSON_MalformedJSON(t *testing.T) {
+	// Invalid JSON (not an array) should return an error.
+	_, err := ParseGitleaksJSON([]byte(`{"not": "an array"}`))
+	if err == nil {
+		t.Error("expected error for JSON object instead of array, got nil")
+	}
+}
+
+func TestParseTrivyJSON_EmptyResults(t *testing.T) {
+	// Results array present but empty — no vulnerabilities to parse.
+	data := []byte(`{"Results": []}`)
+	findings, err := ParseTrivyJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error for empty Results: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for empty Results array, got %d", len(findings))
+	}
+}
+
+func TestParseTrivyJSON_MalformedJSON(t *testing.T) {
+	_, err := ParseTrivyJSON([]byte(`{not valid json`))
+	if err == nil {
+		t.Error("expected error for malformed JSON, got nil")
+	}
+}
+
+func TestParseRkhunterOutput_NoWarnings(t *testing.T) {
+	// Output that has no Warning or Infected lines — should produce 0 findings.
+	cleanOutput := `Starting system checks:
+  Checking for 55808 Trojan - Variant A               [ Not found ]
+  Checking for ADM Worm                               [ Not found ]
+  Checking for Apache Worm                            [ Not found ]
+System checks summary
+=====================
+File properties checks...
+All results have been written to the log file: /var/log/rkhunter.log`
+	findings, err := ParseRkhunterOutput([]byte(cleanOutput))
+	if err != nil {
+		t.Fatalf("unexpected error for clean rkhunter output: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for clean rkhunter output, got %d: %+v", len(findings), findings)
+	}
+}
+
+func TestParseSSHAuditJSON_NoRecommendations(t *testing.T) {
+	// Recommendations array is empty — should produce 0 findings.
+	data := []byte(`{
+		"banner": {"raw": "SSH-2.0-OpenSSH_8.9"},
+		"recommendations": []
+	}`)
+	findings, err := ParseSSHAuditJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error for empty recommendations: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for empty recommendations, got %d", len(findings))
+	}
+}
+
+func TestParseClamAVOutput_EmptyInput(t *testing.T) {
+	// Empty input should return 0 findings, no error.
+	findings, err := ParseClamAVOutput([]byte(""))
+	if err != nil {
+		t.Fatalf("unexpected error for empty ClamAV output: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for empty input, got %d", len(findings))
+	}
+}
+
+func TestParseClamAVOutput_NoFOUND(t *testing.T) {
+	// Lines that don't contain FOUND should produce 0 findings.
+	output := `/var/lib/clamav/main.cvd: OK
+/var/lib/clamav/daily.cvd: OK
+----------- SCAN SUMMARY -----------
+Known viruses: 8662500
+Engine version: 0.103.8
+Scanned directories: 1
+Scanned files: 2
+Infected files: 0
+Data scanned: 2.50 MB
+Time: 5.200 sec (0 m 5 s)`
+	findings, err := ParseClamAVOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("unexpected error for clean ClamAV output: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for ClamAV output without FOUND lines, got %d", len(findings))
+	}
+}
+
+func TestParseClamAVOutput_WithFOUND(t *testing.T) {
+	// Ensure FOUND lines are parsed correctly.
+	output := `/tmp/eicar.com: Eicar-Signature FOUND
+/tmp/clean.txt: OK`
+	findings, err := ParseClamAVOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding for FOUND line, got %d", len(findings))
+	}
+	if findings[0].Scanner != "rootkit" {
+		t.Errorf("expected scanner=rootkit, got %q", findings[0].Scanner)
+	}
+	if findings[0].Location != "/tmp/eicar.com" {
+		t.Errorf("unexpected location: %q", findings[0].Location)
+	}
+}
+
+func TestParseTrivyJSON_MediumAndLowSeverity(t *testing.T) {
+	data := []byte(`{"Results":[{"Vulnerabilities":[
+		{"VulnerabilityID":"CVE-2024-0002","PkgName":"libfoo","InstalledVersion":"1.0","Severity":"MEDIUM","Title":"Medium Bug"},
+		{"VulnerabilityID":"CVE-2024-0003","PkgName":"libbar","InstalledVersion":"2.0","Severity":"LOW","Title":"Low Bug"},
+		{"VulnerabilityID":"CVE-2024-0004","PkgName":"libbaz","InstalledVersion":"3.0","Severity":"INFO","Title":"Info Bug"}
+	]}]}`)
+	findings, err := ParseTrivyJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(findings) != 3 {
+		t.Fatalf("expected 3 findings, got %d", len(findings))
+	}
+
+	sevByTitle := make(map[string]int)
+	for _, f := range findings {
+		sevByTitle[f.Title] = int(f.Severity)
+	}
+	if sevByTitle["Medium Bug"] != 1 {
+		t.Errorf("expected MEDIUM=1 for 'Medium Bug', got %d", sevByTitle["Medium Bug"])
+	}
+	if sevByTitle["Low Bug"] != 0 {
+		t.Errorf("expected LOW=0 for 'Low Bug', got %d", sevByTitle["Low Bug"])
+	}
+	if sevByTitle["Info Bug"] != 0 {
+		t.Errorf("expected LOW=0 for unknown severity 'INFO', got %d", sevByTitle["Info Bug"])
+	}
+}
+
+func TestParseSSHAuditJSON_SeverityLow(t *testing.T) {
+	// "info" severity should map to LOW.
+	data := []byte(`{
+		"banner": {"raw": "SSH-2.0-OpenSSH_8.9"},
+		"recommendations": [
+			{"key": "some-algo", "value": "informational note", "severity": "info"}
+		]
+	}`)
+	findings, err := ParseSSHAuditJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	if findings[0].Severity != 0 { // SevLow = 0
+		t.Errorf("expected LOW severity for 'info', got %d", findings[0].Severity)
+	}
+}
+
 // ── truncate helper ───────────────────────────────────────────────────────────
 
 func TestTruncate(t *testing.T) {

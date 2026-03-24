@@ -166,6 +166,139 @@ func TestAlertDispatcher_NoAlertWhenNoMatchingFindings(t *testing.T) {
 	}
 }
 
+func TestAlertDispatcher_NoAlerters(t *testing.T) {
+	// A dispatcher with no registered alerters should succeed without error.
+	d := reporter.NewAlertDispatcher()
+
+	findings := []scanner.Finding{
+		makeAlertFinding(scanner.SevCritical, "Critical Finding", "evidence"),
+	}
+	results := makeAlertResults(findings...)
+
+	err := d.Dispatch(context.Background(), results, "testhost", "dk-no-alerters")
+	if err != nil {
+		t.Fatalf("expected no error when no alerters registered, got: %v", err)
+	}
+}
+
+func TestAlertDispatcher_AllFilteredOut(t *testing.T) {
+	// When all findings are below the min severity, the alerter should still be called
+	// but receive an empty findings list (no error).
+	cap := &captureAlerter{name: "capture"}
+	d := reporter.NewAlertDispatcher()
+	d.Add(cap, scanner.SevCritical) // only CRITICAL or above
+
+	findings := []scanner.Finding{
+		makeAlertFinding(scanner.SevLow, "Low Finding", "ev1"),
+		makeAlertFinding(scanner.SevMedium, "Medium Finding", "ev2"),
+		makeAlertFinding(scanner.SevHigh, "High Finding", "ev3"),
+	}
+	results := makeAlertResults(findings...)
+
+	err := d.Dispatch(context.Background(), results, "testhost", "dk-all-filtered")
+	if err != nil {
+		t.Fatalf("unexpected error when all findings filtered out: %v", err)
+	}
+
+	if len(cap.reports) != 1 {
+		t.Fatalf("expected 1 report even when all filtered, got %d", len(cap.reports))
+	}
+	if len(cap.reports[0].Findings) != 0 {
+		t.Errorf("expected 0 findings in report when all filtered, got %d", len(cap.reports[0].Findings))
+	}
+	// Summary total should be 0.
+	if cap.reports[0].Summary.Total != 0 {
+		t.Errorf("expected Summary.Total=0 when all filtered, got %d", cap.reports[0].Summary.Total)
+	}
+}
+
+func TestWebhookAlerter_EmptyFindings(t *testing.T) {
+	// Sending an AlertReport with no findings should succeed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := reporter.NewWebhookAlerter(srv.URL, "secret", false)
+	report := reporter.AlertReport{
+		Host:     "testhost",
+		ScanID:   "dk-empty",
+		Time:     time.Now(),
+		Findings: []scanner.Finding{},
+	}
+
+	err := a.Send(context.Background(), report)
+	if err != nil {
+		t.Fatalf("unexpected error sending empty findings via webhook: %v", err)
+	}
+}
+
+func TestSlackAlerter_EmptyFindings(t *testing.T) {
+	// Sending an AlertReport with no findings should succeed and include the
+	// "no findings" placeholder text.
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received = body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := reporter.NewSlackAlerter(srv.URL)
+	report := reporter.AlertReport{
+		Host:     "testhost",
+		ScanID:   "dk-slack-empty",
+		Time:     time.Now(),
+		Findings: []scanner.Finding{},
+	}
+
+	err := a.Send(context.Background(), report)
+	if err != nil {
+		t.Fatalf("unexpected error sending empty findings via slack: %v", err)
+	}
+
+	if len(received) == 0 {
+		t.Fatal("expected non-empty POST body even with no findings")
+	}
+
+	// The payload should contain the "no findings" placeholder text.
+	if !strings.Contains(string(received), "No findings") {
+		t.Errorf("expected payload to contain 'No findings' placeholder, got: %s", string(received))
+	}
+}
+
+func TestSlackAlerter_Name(t *testing.T) {
+	a := reporter.NewSlackAlerter("http://example.com")
+	if a.Name() != "slack" {
+		t.Errorf("expected Name()='slack', got %q", a.Name())
+	}
+}
+
+func TestWebhookAlerter_Name(t *testing.T) {
+	a := reporter.NewWebhookAlerter("http://example.com", "secret", false)
+	if a.Name() != "webhook" {
+		t.Errorf("expected Name()='webhook', got %q", a.Name())
+	}
+}
+
+func TestSlackAlerter_ErrorOnNonSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	a := reporter.NewSlackAlerter(srv.URL)
+	report := reporter.AlertReport{
+		Host:   "testhost",
+		ScanID: "dk-err",
+		Time:   time.Now(),
+	}
+	err := a.Send(context.Background(), report)
+	if err == nil {
+		t.Fatal("expected error for non-2xx response, got nil")
+	}
+}
+
 // --- SlackAlerter tests ---
 
 func TestSlackAlerter_SendsPayload(t *testing.T) {

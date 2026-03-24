@@ -207,6 +207,47 @@ func TestHTMLReporter_HTMLEscapesEvidence(t *testing.T) {
 	}
 }
 
+// TestHTMLReporter_EmptyResults verifies that Generate succeeds and produces valid HTML
+// when there are no findings (empty results slice).
+func TestHTMLReporter_EmptyResults(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "empty_report.html")
+
+	h := reporter.NewHTMLReporter("") // use embedded template
+	err := h.Generate([]scanner.ScanResult{}, "empty-host.local", outputPath)
+	if err != nil {
+		t.Fatalf("Generate returned error for empty results: %v", err)
+	}
+
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		t.Fatalf("expected output file to exist at %s", outputPath)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("could not read output file: %v", err)
+	}
+	content := string(data)
+
+	// The file should contain some HTML structure.
+	if len(content) == 0 {
+		t.Fatal("expected non-empty HTML output even with no findings")
+	}
+
+	// The host name should appear in the report.
+	if !strings.Contains(content, "empty-host.local") {
+		t.Errorf("expected HTML to contain hostname 'empty-host.local', got:\n%s", content[:min(500, len(content))])
+	}
+}
+
+// min is a local helper to avoid Go version compatibility issues.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // TestHTMLReporter_ContainsWarning verifies the sharing-warning banner is present.
 func TestHTMLReporter_ContainsWarning(t *testing.T) {
 	tmpDir := t.TempDir()

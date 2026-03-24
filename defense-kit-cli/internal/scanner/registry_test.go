@@ -194,3 +194,30 @@ func TestMockScanner_Scan_ReturnsOneFinding(t *testing.T) {
 		t.Error("finding ID must not be empty")
 	}
 }
+
+func TestRegistry_DuplicateRegistration(t *testing.T) {
+	r := NewRegistry()
+	original := newMock("my-scanner", "cat-a", true)
+	replacement := newMock("my-scanner", "cat-b", false) // same name, different category/availability
+
+	r.Register(original)
+	r.Register(replacement)
+
+	// Only one scanner should be present.
+	all := r.All()
+	if len(all) != 1 {
+		t.Fatalf("expected 1 scanner after duplicate registration, got %d", len(all))
+	}
+
+	// The scanner should be the replacement.
+	got, ok := r.ByName("my-scanner")
+	if !ok {
+		t.Fatal("expected to find 'my-scanner' after re-registration")
+	}
+	if got.Category() != "cat-b" {
+		t.Errorf("expected replaced scanner category 'cat-b', got %q", got.Category())
+	}
+	if got.Available() != false {
+		t.Error("expected replaced scanner to be unavailable")
+	}
+}

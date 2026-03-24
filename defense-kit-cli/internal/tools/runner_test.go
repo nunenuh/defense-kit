@@ -66,3 +66,34 @@ func TestRunnerRunWithStderr(t *testing.T) {
 	// stderr should be empty for echo
 	_ = stderr
 }
+
+func TestRunner_RunWithStderr_CapturesStderr(t *testing.T) {
+	// Use sh to write to both stdout and stderr.
+	r := NewRunner()
+	stdout, stderr, err := r.RunWithStderr(
+		context.Background(),
+		"sh",
+		[]string{"-c", "echo out; echo err >&2"},
+	)
+	// sh exits 0 so err should be nil.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(string(stdout)) != "out" {
+		t.Errorf("expected stdout='out', got %q", string(stdout))
+	}
+	if strings.TrimSpace(string(stderr)) != "err" {
+		t.Errorf("expected stderr='err', got %q", string(stderr))
+	}
+}
+
+func TestRunner_RunWithStderr_Nonexistent(t *testing.T) {
+	r := NewRunner()
+	stdout, stderr, err := r.RunWithStderr(context.Background(), "nonexistent_binary_xyz_789", []string{})
+	if err == nil {
+		t.Fatal("expected error for nonexistent binary, got nil")
+	}
+	// stdout and stderr should be nil/empty when the binary is not found.
+	_ = stdout
+	_ = stderr
+}
