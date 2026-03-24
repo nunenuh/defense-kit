@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Scanners</h1>
-    <span class="last-scan">{{.AvailableCount}} of {{.TotalCount}} available</span>
+    <span class="last-scan">{{.AvailableCount}} of {{.TotalCount}} scanners available</span>
 </div>
 
 <div class="table-wrap">
@@ -53,7 +53,7 @@
             </tr>
         </thead>
         <tbody>
-        {{range .ExternalTools}}
+        {{range .Tools}}
         <tr>
             <td>
                 {{if .Installed}}
@@ -64,8 +64,8 @@
                 <span class="badge missing">Not Found</span>
                 {{end}}
             </td>
-            <td style="font-weight:500;">{{.Name}}</td>
-            <td><span style="font-size:12px;color:#8b949e;">{{.Category}}</span></td>
+            <td style="font-weight:500;">{{.Def.Binary}}</td>
+            <td><span style="font-size:12px;color:#8b949e;">{{.Def.Category}}</span></td>
             <td class="mono">{{if .Version}}{{.Version}}{{else}}<span style="color:#6e7681">—</span>{{end}}</td>
             <td class="mono" style="font-size:11px;color:#8b949e;">{{if .Path}}{{.Path}}{{else}}<span style="color:#6e7681">—</span>{{end}}</td>
         </tr>

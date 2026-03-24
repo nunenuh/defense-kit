@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html/template"
@@ -35,7 +36,11 @@ type pageData struct {
 	Findings       []findingRow
 	Scans          []ScanRecord
 	Scanners       []scannerInfo
+	ScannerNames   []string // plain scanner name list for findings filter dropdown
 	Tools          []tools.ToolStatus
+	TotalCount     int            // total item count for sub-pages
+	AvailableCount int            // available scanner count for scanners page
+	Config         DashboardConfig // settings page config
 }
 
 type severitySummary struct {
@@ -212,16 +217,21 @@ func (s *Server) setupRoutes() {
 // renderPage renders a page template within the layout.
 // The page .html file must define {{define "content"}}...{{end}}.
 // We execute layout.html which calls {{template "content" .}}.
+// Output is buffered so that a template error returns a clean 500 instead of
+// writing a partial 200 body and then calling WriteHeader again.
 func (s *Server) renderPage(w http.ResponseWriter, page string, data pageData) {
 	tmpl, ok := s.pages[page]
 	if !ok || tmpl == nil {
 		http.Error(w, "template not found: "+page, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.ExecuteTemplate(w, "layout.html", data); err != nil {
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "layout.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
 }
 
 // buildHomeData loads data for the home page.
@@ -282,6 +292,16 @@ func (s *Server) handleFindingsPage(w http.ResponseWriter, r *http.Request) {
 	if scanID != "" {
 		findings, _ := s.db.GetFindings(scanID)
 		data.Findings = findingsToRows(findings)
+		data.TotalCount = len(data.Findings)
+
+		// Collect unique scanner names for the filter dropdown.
+		seen := make(map[string]bool)
+		for _, f := range data.Findings {
+			if !seen[f.Scanner] {
+				seen[f.Scanner] = true
+				data.ScannerNames = append(data.ScannerNames, f.Scanner)
+			}
+		}
 	}
 
 	s.renderPage(w, "findings.html", data)
@@ -308,13 +328,18 @@ func (s *Server) handleScannersPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, sc := range s.registry.All() {
-		data.Scanners = append(data.Scanners, scannerInfo{
+		info := scannerInfo{
 			Name:        sc.Name(),
 			Category:    sc.Category(),
 			Available:   sc.Available(),
 			Description: sc.Description(),
-		})
+		}
+		data.Scanners = append(data.Scanners, info)
+		if info.Available {
+			data.AvailableCount++
+		}
 	}
+	data.TotalCount = len(data.Scanners)
 
 	data.Tools = s.toolReg.CheckAll()
 
@@ -323,9 +348,11 @@ func (s *Server) handleScannersPage(w http.ResponseWriter, r *http.Request) {
 
 // handleSettingsPage renders the settings HTML page.
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := loadConfig()
 	data := pageData{
 		Title:  "Settings",
 		Active: "settings",
+		Config: cfg,
 	}
 	s.renderPage(w, "settings.html", data)
 }

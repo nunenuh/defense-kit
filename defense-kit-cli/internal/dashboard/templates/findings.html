@@ -17,7 +17,7 @@
     <label for="filter-scanner">Scanner:</label>
     <select id="filter-scanner" onchange="applyFilters()">
         <option value="">All Scanners</option>
-        {{range .Scanners}}
+        {{range .ScannerNames}}
         <option value="{{.}}">{{.}}</option>
         {{end}}
     </select>
@@ -56,9 +56,9 @@
         <tr class="detail-row" id="detail-{{.ID}}" style="display:none;">
             <td colspan="5">
                 <div class="detail-content">
-                    {{if .Description}}
+                    {{if .Detail}}
                     <div class="field-label">Description</div>
-                    <div>{{.Description}}</div>
+                    <div>{{.Detail}}</div>
                     {{end}}
 
                     {{if .Evidence}}
@@ -69,11 +69,6 @@
                     {{if .Remediation}}
                     <div class="field-label">Remediation</div>
                     <div class="remediation">{{.Remediation}}</div>
-                    {{end}}
-
-                    {{if .Reference}}
-                    <div class="field-label">Reference</div>
-                    <div><a href="{{.Reference}}" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;">{{.Reference}}</a></div>
                     {{end}}
                 </div>
             </td>

@@ -28,16 +28,16 @@
         <tbody>
         {{range .Scans}}
         <tr>
-            <td class="mono">{{.Date}}</td>
-            <td class="mono" style="color:#8b949e;font-size:11px;">{{.ScanID}}</td>
-            <td>{{.Duration}}</td>
+            <td class="mono">{{.Timestamp.Format "2006-01-02 15:04"}}</td>
+            <td class="mono" style="color:#8b949e;font-size:11px;">{{.ID}}</td>
+            <td>{{.Duration}}ms</td>
             <td style="color:#f85149;font-weight:600;">{{.Critical}}</td>
             <td style="color:#f0883e;font-weight:600;">{{.High}}</td>
             <td style="color:#d29922;font-weight:600;">{{.Medium}}</td>
             <td style="color:#58a6ff;font-weight:600;">{{.Low}}</td>
             <td style="font-weight:600;">{{.Total}}</td>
             <td>
-                <a class="btn" href="/findings?scan={{.ScanID}}" style="font-size:12px;padding:4px 10px;">
+                <a class="btn" href="/findings?scan={{.ID}}" style="font-size:12px;padding:4px 10px;">
                     View
                 </a>
             </td>

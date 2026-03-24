@@ -2,9 +2,11 @@ package dashboard
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,4 +261,47 @@ func TestHomePage_Returns200(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status: got %d, want 200", resp.StatusCode)
 	}
+}
+
+// TestDashboardIntegration starts the server on a random port via httptest,
+// GETs /, and verifies that the response is a proper 200 HTML page containing
+// the "defense-kit" branding text.
+func TestDashboardIntegration(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type: got %q, want text/html", ct)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "defense-kit") {
+		t.Errorf("response body does not contain \"defense-kit\"\nbody (first 500 bytes): %s",
+			bodyStr[:min(500, len(bodyStr))])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
