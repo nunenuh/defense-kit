@@ -14,11 +14,18 @@ import (
 )
 
 // PAMScanner scans /etc/pam.d/ configuration files for suspicious PAM modules.
-type PAMScanner struct{}
+type PAMScanner struct {
+	pamDir string
+}
 
-// NewPAMScanner creates a new PAMScanner.
+// NewPAMScanner creates a new PAMScanner with default path.
 func NewPAMScanner() *PAMScanner {
-	return &PAMScanner{}
+	return &PAMScanner{pamDir: "/etc/pam.d"}
+}
+
+// NewPAMScannerWithPath creates a scanner with custom path (for testing).
+func NewPAMScannerWithPath(pamDir string) *PAMScanner {
+	return &PAMScanner{pamDir: pamDir}
 }
 
 func (s *PAMScanner) Name() string           { return "pam" }
@@ -82,12 +89,12 @@ var pamRules = []pamModuleRule{
 
 // Scan inspects all files in /etc/pam.d/ for dangerous modules.
 func (s *PAMScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scanner.Finding, error) {
-	findings, err := scanPAMDir("/etc/pam.d")
+	findings, err := scanPAMDir(s.pamDir)
 	if err != nil {
 		return findings, err
 	}
-	findings = append(findings, checkUnownedPAMModules("/etc/pam.d")...)
-	findings = append(findings, checkCommonAuthModified("/etc/pam.d/common-auth")...)
+	findings = append(findings, checkUnownedPAMModules(s.pamDir)...)
+	findings = append(findings, checkCommonAuthModified(filepath.Join(s.pamDir, "common-auth"))...)
 	return findings, nil
 }
 

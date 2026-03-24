@@ -13,11 +13,19 @@ import (
 
 // LDPreloadScanner checks /etc/ld.so.preload and /etc/ld.so.conf.d/ for
 // suspicious shared-library preload configurations.
-type LDPreloadScanner struct{}
+type LDPreloadScanner struct {
+	preloadPath string
+	confDir     string
+}
 
-// NewLDPreloadScanner creates a new LDPreloadScanner.
+// NewLDPreloadScanner creates a new LDPreloadScanner with default paths.
 func NewLDPreloadScanner() *LDPreloadScanner {
-	return &LDPreloadScanner{}
+	return &LDPreloadScanner{preloadPath: "/etc/ld.so.preload", confDir: "/etc/ld.so.conf.d"}
+}
+
+// NewLDPreloadScannerWithPaths creates a scanner with custom paths (for testing).
+func NewLDPreloadScannerWithPaths(preloadPath, confDir string) *LDPreloadScanner {
+	return &LDPreloadScanner{preloadPath: preloadPath, confDir: confDir}
 }
 
 func (s *LDPreloadScanner) Name() string           { return "ld_preload" }
@@ -35,13 +43,12 @@ func (s *LDPreloadScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]sca
 	var findings []scanner.Finding
 
 	// Check /etc/ld.so.preload — any entry here is suspicious.
-	preloadFindings, err := scanLDSoPreload("/etc/ld.so.preload")
+	preloadFindings, err := scanLDSoPreload(s.preloadPath)
 	if err == nil {
 		findings = append(findings, preloadFindings...)
 	}
 
-	// Check /etc/ld.so.conf.d/ for entries pointing to /tmp, /dev/shm, /home.
-	confDFindings, err := scanLDSoConfD("/etc/ld.so.conf.d")
+	confDFindings, err := scanLDSoConfD(s.confDir)
 	if err == nil {
 		findings = append(findings, confDFindings...)
 	}
