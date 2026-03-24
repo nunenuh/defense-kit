@@ -74,6 +74,17 @@ func NewRootkitScanner() *RootkitScanner {
 	}
 }
 
+// NewRootkitScannerWithModulesPath creates a RootkitScanner with a custom
+// /proc/modules path (used in tests).
+func NewRootkitScannerWithModulesPath(modulesPath string) *RootkitScanner {
+	return &RootkitScanner{
+		procModulesPath: modulesPath,
+		sysModulePath:   "/sys/module",
+		devPath:         "/dev",
+		procPath:        "/proc",
+	}
+}
+
 func (s *RootkitScanner) Name() string            { return "rootkit" }
 func (s *RootkitScanner) Category() string        { return "system" }
 func (s *RootkitScanner) RequiresRoot() bool      { return true }
@@ -229,14 +240,33 @@ func (s *RootkitScanner) checkDevFiles() ([]scanner.Finding, error) {
 			continue
 		}
 
+		// Only flag character/block devices that match truly suspicious patterns.
+		// Most /dev entries are legitimate kernel devices — only flag patterns
+		// commonly used by rootkits (hidden files, temp-like names, known backdoor names).
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-
-		// Only flag character and block devices (not sockets, pipes, etc.).
 		mode := info.Mode()
 		if mode&os.ModeDevice == 0 && mode&os.ModeCharDevice == 0 {
+			continue
+		}
+
+		// Only flag if name matches rootkit indicators
+		suspicious := false
+		reason := ""
+		if strings.HasPrefix(name, ".") {
+			suspicious = true
+			reason = "Hidden device file (starts with dot)"
+		} else if strings.Contains(lower, "rootkit") || strings.Contains(lower, "backdoor") || strings.Contains(lower, "keylog") {
+			suspicious = true
+			reason = "Name contains rootkit-associated keyword"
+		} else if strings.HasPrefix(name, "__") {
+			suspicious = true
+			reason = "Double-underscore prefix (common rootkit pattern)"
+		}
+
+		if !suspicious {
 			continue
 		}
 
@@ -246,7 +276,7 @@ func (s *RootkitScanner) checkDevFiles() ([]scanner.Finding, error) {
 			Scanner:     s.Name(),
 			Severity:    scanner.SevCritical,
 			Title:       "Suspicious device file in /dev",
-			Detail:      fmt.Sprintf("Non-standard device file %q found in /dev. Rootkits often create device files for covert communication channels.", name),
+			Detail:      fmt.Sprintf("%s: %q in /dev. Rootkits often create device files for covert communication.", reason, name),
 			Evidence:    fmt.Sprintf("path: %s, mode: %s", loc, mode.String()),
 			Location:    loc,
 			Remediation: fmt.Sprintf("Investigate %s and remove if not associated with a legitimate driver.", loc),
@@ -395,16 +425,27 @@ func (s *RootkitScanner) checkHidingModules() ([]scanner.Finding, error) {
 		if procMods[normalized] {
 			continue
 		}
+
+		// Modules in /sys/module/ but NOT in /proc/modules are usually built-in
+		// kernel modules (compiled into vmlinuz, not loaded as .ko files).
+		// Only flag modules that have an "initstate" file — these are loadable
+		// modules that should appear in /proc/modules but don't.
+		initstatePath := filepath.Join(s.sysModulePath, name, "initstate")
+		if _, err := os.Stat(initstatePath); os.IsNotExist(err) {
+			// No initstate file → built-in module, not suspicious.
+			continue
+		}
+
 		loc := filepath.Join(s.sysModulePath, name)
 		findings = append(findings, scanner.Finding{
 			ID:          scanner.GenerateFindingID(s.Name(), loc, "module hiding from proc/modules"),
 			Scanner:     s.Name(),
 			Severity:    scanner.SevCritical,
 			Title:       "Kernel module hiding from /proc/modules",
-			Detail:      fmt.Sprintf("Module %q is present in %s but does not appear in /proc/modules. A rootkit may be intercepting the module list to hide this module.", name, s.sysModulePath),
-			Evidence:    fmt.Sprintf("present in /sys/module/%s, absent from /proc/modules", name),
+			Detail:      fmt.Sprintf("Module %q has initstate in %s but does not appear in /proc/modules. A rootkit may be hiding this loaded module.", name, s.sysModulePath),
+			Evidence:    fmt.Sprintf("present in /sys/module/%s/initstate, absent from /proc/modules", name),
 			Location:    loc,
-			Remediation: fmt.Sprintf("Investigate module %q with 'modinfo %s'. This may indicate a kernel-level rootkit. Consider booting from trusted media for a clean audit.", name, name),
+			Remediation: fmt.Sprintf("Investigate module %q with 'modinfo %s'. Consider booting from trusted media for a clean audit.", name, name),
 		})
 	}
 	return findings, nil
