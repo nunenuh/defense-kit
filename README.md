@@ -1,8 +1,9 @@
 # defense-kit
 
+[![CI](https://github.com/nunenuh/defense-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/nunenuh/defense-kit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Defensive security toolkit for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Scan, harden, and monitor your OS, code, repos, and infrastructure.
+Defensive security toolkit for Linux. 38 scanners, 4 hardeners, local dashboard, threat intelligence, forensics timeline. Scan, harden, monitor, and comply — from your laptop to your servers.
 
 ## Install
 
@@ -10,95 +11,112 @@ Defensive security toolkit for [Claude Code](https://docs.anthropic.com/en/docs/
 curl -sSL https://get.nunenuh.me/defense-kit | bash
 ```
 
+Skip external tools:
+```bash
+curl -sSL https://get.nunenuh.me/defense-kit | bash -s -- --no-tools
+```
+
 Or clone:
 ```bash
 git clone https://github.com/nunenuh/defense-kit.git
-cd defense-kit
-./install.sh
+cd defense-kit && ./install.sh
 ```
-
-## Modes
-
-| Mode | Command | What It Does |
-|------|---------|-------------|
-| **Scan** | `/defense-kit scan` | Audit everything, report findings (read-only) |
-| **Harden** | `/defense-kit harden` | Scan + auto-fix with approval + rollback script |
-| **Monitor** | `/defense-kit monitor` | Watch for changes, alert on anomalies |
-| **Comply** | `/defense-kit comply` | Map findings to CIS/SOC2/OWASP frameworks |
 
 ## Quick Start
 
-### Docker (Recommended)
-
 ```bash
-git clone https://github.com/nunenuh/defense-kit.git
-cd defense-kit
-
-docker compose build
-
-# Scan your code
-TARGET_PATH=/path/to/your/code docker compose up -d
-docker compose exec defense-kit bash
-
-# Quick scan
-bash tools/scripts/quick-scan.sh /defense-kit/target/
+defense-kit scan                          # full system audit (38 scanners)
+defense-kit scan --profile workstation    # preset for laptops
+defense-kit dashboard --port 8080 --open  # browser dashboard
+defense-kit harden --dry-run              # preview security fixes
+defense-kit schedule enable --interval 6h # auto-scan
+defense-kit comply --framework cis        # CIS Benchmark report
 ```
 
-### Local (for OS-level scans)
+## Commands
 
-```bash
-# Some scans need local access (OS audit, firewall, disk encryption)
-./install.sh --local
-/defense-kit scan --local
-```
+| Command | What It Does |
+|---------|-------------|
+| `scan` | Read-only audit across 38 scanners |
+| `harden` | Fix issues with approval + rollback |
+| `monitor` | Quick scan + diff against baseline |
+| `dashboard` | Local web dashboard (SQLite + htmx) |
+| `comply` | Map findings to CIS/SOC2/OWASP |
+| `schedule` | Auto-scan via systemd timer or cron |
+| `baseline` | Track changes over time |
+| `tools check` | Show scanners + external tools |
+| `report html` | Generate HTML report |
+| `outputs` | Manage scan history |
 
 ## What It Scans
 
-| Target | Tools | Checks |
-|--------|-------|--------|
-| OS | lynis, osquery | CIS benchmarks, weak configs, disk encryption |
-| Network | nmap, ss | Open ports, listening services, firewall rules |
-| Code | semgrep, bandit | SAST vulnerabilities, insecure patterns |
-| Secrets | gitleaks, trufflehog | Git history, .env files, API keys, private keys |
-| Dependencies | trivy, grype, pip-audit | Known CVEs, outdated packages |
-| Containers | hadolint, dockle, trivy | Dockerfile lint, image vulns, best practices |
-| SSH | ssh-audit | Key strength, config hardening |
-| Git | gh api | Branch protection, signed commits |
+38 scanners across 10 groups:
+
+| Group | Scanners | What It Detects |
+|-------|----------|----------------|
+| **environment** | shell_rc, env_vars, ld_preload, pam | RC poisoning, PATH hijacking, library injection |
+| **persistence** | cron, systemd, scheduled | Malicious cron/services, backdoor timers |
+| **process** | processes, memory, clipboard | Reverse shells, miners, keyloggers |
+| **filesystem** | integrity, anomalies, timestomp, capabilities, swap, encryption | SUID abuse, anti-forensics, unencrypted disks |
+| **network** | ports, connections, dns, firewall, vpn, threat_intel | C2 connections, DNS exfiltration, known-bad IPs |
+| **auth** | ssh, users, browser | Weak SSH, UID 0 backdoors, saved passwords |
+| **system** | rootkit, boot, logs, package_manager, sysctl, services, mac, updates, auditd | Rootkits, log tampering, missing patches |
+| **code** | credentials, supply_chain, containers, git_hooks, docker_runtime | Leaked secrets, CVEs, malicious hooks |
 
 ## What It Hardens
 
-| Target | Actions |
-|--------|---------|
-| OS | sysctl params, core dump disable, auto-updates |
-| Firewall | ufw enable, deny incoming, allow SSH |
-| SSH | Disable root login, disable password auth, limit attempts |
-| Git | Pre-commit hooks (gitleaks), branch protection, commit signing |
-| Docker | Non-root user, healthcheck, pinned versions |
+| Hardener | Fixes |
+|----------|-------|
+| **SSH** | PermitRootLogin, PasswordAuth, EmptyPasswords, MaxAuthTries |
+| **OS** | 9 sysctl params (ip_forward, ASLR, SYN cookies, etc.) |
+| **Firewall** | UFW setup with SSH safety |
+| **Git** | Disable hooks, enable fsckobjects |
 
-Every hardening change:
-- Requires your approval
-- Creates a backup
-- Generates a rollback script
+Every fix: requires approval, creates backup, generates rollback script.
+
+## External Tools
+
+Installed by default. Enhance detection when available, graceful fallback when not.
+
+rkhunter, chkrootkit, lynis, ClamAV, gitleaks, trufflehog, trivy, grype, hadolint, dockle, ssh-audit, semgrep, bandit, nmap, aide, debsums
+
+## Dashboard
+
+```bash
+defense-kit dashboard --port 8080 --open
+```
+
+Local-only web UI with:
+- Security overview with severity cards
+- Filterable findings table
+- Scan history with trend charts
+- Scanner + tool status
+- Settings management
+- Background auto-scanning
+
+## Docker
+
+```bash
+make docker-build
+TARGET_PATH=/path/to/code make docker-up
+make docker-scan
+```
 
 ## Structure
 
 ```
 defense-kit/
-├── .claude/
-│   ├── skills/defense-kit/SKILL.md
-│   └── agents/
-│       ├── orchestrator.md     # Coordinates scan/harden/monitor
-│       ├── scanner.md          # Read-only scanning
-│       └── hardener.md         # Fix with approval + rollback
-├── scanners/                   # Scanner configs and scripts
-├── hardeners/                  # Hardening playbooks
-├── monitors/                   # Monitoring configs
-├── policies/
-│   └── baseline.yml            # Your security baseline
-├── tools/scripts/
-│   └── quick-scan.sh           # One-command full scan
-├── Dockerfile                  # Kali-based container
-└── docker-compose.yml
+├── defense-kit-cli/          # Go binary (all source code)
+│   ├── cmd/defense-kit/      # CLI entry point
+│   └── internal/             # Scanner, hardener, reporter, dashboard, etc.
+├── docker/                   # Dockerfile + docker-compose
+├── .claude/                  # Claude agents + skill definition
+├── policies/                 # Security baseline (YAML)
+├── tools/                    # REGISTRY.md + PIPELINES.md
+├── specs/                    # Design specs + gap analysis
+├── install.sh                # Local installer
+├── install-remote.sh         # curl-pipe installer
+└── Makefile                  # Build targets
 ```
 
 ## How It Differs From pentest-kit
@@ -106,7 +124,6 @@ defense-kit/
 | | pentest-kit | defense-kit |
 |---|---|---|
 | Purpose | Find vulns in **others** | Protect **yourself** |
-| Target | External apps/systems | Your own laptop/code/infra |
 | Mode | Offensive | Defensive |
 | Output | Pentest report | Compliance report + auto-fix |
 | Runs | Per engagement | Continuously / scheduled |

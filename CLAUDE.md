@@ -1,45 +1,36 @@
 # defense-kit
 
-Defensive security toolkit for Claude Code.
-
-## v2 Architecture (Hybrid)
-
-- **Go binary on HOST** — OS, kernel, process, network, and SSH scans (requires real system access)
-- **Docker container** — isolated code, dependency, container, and secret scanning
+Defensive security toolkit for Linux. Go binary with 38 scanners, 4 hardeners, local dashboard.
 
 ## Setup
 
 ```bash
-# Build Go binary and Docker image
-make docker-build
-
-# Start container (set TARGET_PATH to the code you want to scan)
-TARGET_PATH=/path/to/code make docker-up
-
-# Open a shell in the container
-docker compose -f docker/docker-compose.yml exec defense-kit bash
+cd defense-kit-cli && make build
+# Or: ./install.sh
 ```
 
 ## Usage
 
-- `/defense-kit scan` — audit everything (read-only)
-- `/defense-kit harden` — fix issues with approval
-- `/defense-kit monitor` — watch for changes
-- `/defense-kit comply` — compliance report
+```bash
+defense-kit scan                          # full audit
+defense-kit scan --profile workstation    # laptop preset
+defense-kit harden --dry-run              # preview fixes
+defense-kit dashboard --port 8080         # web dashboard
+defense-kit monitor                       # quick scan + diff
+defense-kit comply --framework cis        # compliance report
+defense-kit schedule enable --interval 6h # auto-scan
+defense-kit tools check                   # show available scanners/tools
+```
 
-### Make Targets
+## Architecture
 
-| Target | Description |
-|--------|-------------|
-| `make build` | Build Go binary |
-| `make docker-build` | Build Go binary then Docker image |
-| `make docker-up` | Start container (requires TARGET_PATH) |
-| `make docker-scan` | Run scan inside running container |
-| `make docker-down` | Stop container |
+- **Go binary** in `defense-kit-cli/` — single binary, all scanners
+- **Docker** in `docker/` — isolated code/dependency scanning
+- **Claude agents** in `.claude/` — AI copilot for recommendations
 
 ## Rules
 
 - Scan mode is READ-ONLY
-- Harden mode REQUIRES user approval for every change
+- Harden mode REQUIRES user approval
 - Always generate rollback script before modifying
 - Never break SSH or networking

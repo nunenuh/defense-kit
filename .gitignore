@@ -1,10 +1,11 @@
-# Outputs
-outputs/*
-!outputs/.gitkeep
+# Build artifacts
+defense-kit-cli/bin/
+defense-kit-cli/defense-kit
+*.exe
 
-# Target
-target/*
-!target/.gitkeep
+# Test artifacts
+coverage.out
+*.test
 
 # Private policies
 policies.local/
@@ -20,6 +21,7 @@ node_modules/
 # Environment
 .env
 .env.local
+.env.*
 
 # OS
 .DS_Store
@@ -30,3 +32,8 @@ node_modules/
 
 # Docker
 docker-compose.override.yml
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
