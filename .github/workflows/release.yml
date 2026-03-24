@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: defense-kit-cli
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: defense-kit-cli/go.sum
+
+      - name: Run tests
+        run: go test ./... -race -timeout 300s
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/defense-kit-linux-amd64 ./cmd/defense-kit
+          tar -czf dist/defense-kit-linux-amd64.tar.gz -C dist defense-kit-linux-amd64
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/defense-kit-linux-arm64 ./cmd/defense-kit
+          tar -czf dist/defense-kit-linux-arm64.tar.gz -C dist defense-kit-linux-arm64
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            defense-kit-cli/dist/*.tar.gz
+            defense-kit-cli/dist/checksums.txt
