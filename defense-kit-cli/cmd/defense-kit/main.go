@@ -27,6 +27,8 @@ import (
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
+var version = "dev" // set via -ldflags at build time
+
 var (
 	cfgFile string
 	verbose bool
@@ -48,6 +50,7 @@ func newRootCmd() *cobra.Command {
 It provides scanning, baselining, and tooling capabilities to
 audit, harden, and monitor your Linux systems.`,
 		SilenceUsage: true,
+		Version:      version,
 	}
 
 	root.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.defense-kit.yaml)")
@@ -70,8 +73,35 @@ audit, harden, and monitor your Linux systems.`,
 	root.AddCommand(newComplyCmd())
 	root.AddCommand(newDashboardCmd())
 	root.AddCommand(newOutputsCmd())
+	root.AddCommand(newCompletionCmd())
 
 	return root
+}
+
+func newCompletionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "completion [bash|zsh|fish]",
+		Short: "Generate shell completion script",
+		Long: `Generate shell completion script for bash, zsh, or fish.
+
+  bash:  source <(defense-kit completion bash)
+  zsh:   defense-kit completion zsh > "${fpath[1]}/_defense-kit"
+  fish:  defense-kit completion fish | source`,
+		Args:      cobra.ExactArgs(1),
+		ValidArgs: []string{"bash", "zsh", "fish"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch args[0] {
+			case "bash":
+				return cmd.Root().GenBashCompletion(os.Stdout)
+			case "zsh":
+				return cmd.Root().GenZshCompletion(os.Stdout)
+			case "fish":
+				return cmd.Root().GenFishCompletion(os.Stdout, true)
+			default:
+				return fmt.Errorf("unsupported shell: %s", args[0])
+			}
+		},
+	}
 }
 
 // outputsDir returns the directory used to store scan output and baselines.
@@ -228,11 +258,13 @@ func runScan(cfgPath string, quick, diff bool, category, profile, output string,
 	fmt.Fprintf(os.Stdout, "Running scan (concurrency=%d, timeout=%s)...\n", concurrency, timeout)
 	logger.Log.Info("scan started", "concurrency", concurrency, "timeout", timeout.String(), "profile", profile)
 
+	scanStart := time.Now()
 	progress := func(current, total int, scannerName string) {
 		fmt.Fprintf(os.Stderr, "[%d/%d] Scanning: %s...\n", current, total, scannerName)
 		logger.Log.Debug("scanner running", "current", current, "total", total, "scanner", scannerName)
 	}
 	results := engine.RunWithProgress(ctx, opts, progress)
+	elapsed := time.Since(scanStart)
 
 	// Render to terminal.
 	term := reporter.NewTerminalReporter(os.Stdout)
@@ -251,12 +283,9 @@ func runScan(cfgPath string, quick, diff bool, category, profile, output string,
 
 	// Generate HTML report if requested.
 	if htmlPath != "" {
-		// Probe template paths: working directory first, then relative to binary.
-		templatePath := "templates/report.html"
-		if _, statErr := os.Stat(templatePath); os.IsNotExist(statErr) {
-			templatePath = filepath.Join(executableDir(), "..", "templates", "report.html")
-		}
-		hr := reporter.NewHTMLReporter(templatePath)
+		// Pass empty templatePath to use the embedded template.
+		// A non-empty path can be supplied for custom templates.
+		hr := reporter.NewHTMLReporter("")
 		if genErr := hr.Generate(results, host, htmlPath); genErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: HTML report failed: %v\n", genErr)
 		} else {
@@ -303,6 +332,13 @@ func runScan(cfgPath string, quick, diff bool, category, profile, output string,
 	for _, r := range results {
 		allFindings = append(allFindings, r.Findings...)
 	}
+
+	// Print scan summary.
+	counts := reporter.CountBySeverity(allFindings)
+	fmt.Fprintf(os.Stderr, "\nScan complete in %.1fs. %d findings: %d critical, %d high, %d medium, %d low\n",
+		elapsed.Seconds(), len(allFindings),
+		counts[scanner.SevCritical], counts[scanner.SevHigh],
+		counts[scanner.SevMedium], counts[scanner.SevLow])
 
 	// Auto-create baseline on first scan (empty baseline).
 	if bl.ScanID == "" && loadErr == nil {
@@ -837,13 +873,8 @@ func runReportHTML(outputPath string) error {
 		return fmt.Errorf("report html: parse %q: %w", latestJSON, err)
 	}
 
-	// Resolve template path.
-	templatePath := "templates/report.html"
-	if _, statErr := os.Stat(templatePath); os.IsNotExist(statErr) {
-		templatePath = filepath.Join(executableDir(), "..", "templates", "report.html")
-	}
-
-	hr := reporter.NewHTMLReporter(templatePath)
+	// Use embedded template (pass empty path).
+	hr := reporter.NewHTMLReporter("")
 	if err := hr.Generate(scanReport.Results, scanReport.Host, outputPath); err != nil {
 		return fmt.Errorf("report html: generate: %w", err)
 	}

@@ -3,7 +3,7 @@
 [![CI](https://github.com/nunenuh/defense-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/nunenuh/defense-kit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Defensive security toolkit for Linux. 38 scanners, 4 hardeners, local dashboard, threat intelligence, forensics timeline. Scan, harden, monitor, and comply — from your laptop to your servers.
+Defensive security toolkit for Linux. 42 scanners, 4 hardeners, local dashboard, threat intelligence, forensics timeline. Scan, harden, monitor, and comply — from your laptop to your servers.
 
 ## Install
 
@@ -25,7 +25,7 @@ cd defense-kit && ./install.sh
 ## Quick Start
 
 ```bash
-defense-kit scan                          # full system audit (38 scanners)
+defense-kit scan                          # full system audit (42 scanners)
 defense-kit scan --profile workstation    # preset for laptops
 defense-kit dashboard --port 8080 --open  # browser dashboard
 defense-kit harden --dry-run              # preview security fixes
@@ -37,7 +37,7 @@ defense-kit comply --framework cis        # CIS Benchmark report
 
 | Command | What It Does |
 |---------|-------------|
-| `scan` | Read-only audit across 38 scanners |
+| `scan` | Read-only audit across 42 scanners |
 | `harden` | Fix issues with approval + rollback |
 | `monitor` | Quick scan + diff against baseline |
 | `dashboard` | Local web dashboard (SQLite + htmx) |
@@ -50,18 +50,19 @@ defense-kit comply --framework cis        # CIS Benchmark report
 
 ## What It Scans
 
-38 scanners across 10 groups:
+42 scanners across 10 groups:
 
 | Group | Scanners | What It Detects |
 |-------|----------|----------------|
 | **environment** | shell_rc, env_vars, ld_preload, pam | RC poisoning, PATH hijacking, library injection |
-| **persistence** | cron, systemd, scheduled | Malicious cron/services, backdoor timers |
+| **persistence** | cron, systemd, scheduled, xdg_autostart | Malicious cron/services, backdoor timers, XDG autostart abuse |
 | **process** | processes, memory, clipboard | Reverse shells, miners, keyloggers |
 | **filesystem** | integrity, anomalies, timestomp, capabilities, swap, encryption | SUID abuse, anti-forensics, unencrypted disks |
 | **network** | ports, connections, dns, firewall, vpn, threat_intel | C2 connections, DNS exfiltration, known-bad IPs |
 | **auth** | ssh, users, browser | Weak SSH, UID 0 backdoors, saved passwords |
 | **system** | rootkit, boot, logs, package_manager, sysctl, services, mac, updates, auditd | Rootkits, log tampering, missing patches |
 | **code** | credentials, supply_chain, containers, git_hooks, docker_runtime | Leaked secrets, CVEs, malicious hooks |
+| **forensics** | ebpf, webshell | eBPF backdoors, webshell indicators |
 
 ## What It Hardens
 

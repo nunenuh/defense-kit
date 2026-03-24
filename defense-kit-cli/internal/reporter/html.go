@@ -1,6 +1,7 @@
 package reporter
 
 import (
+	_ "embed"
 	"fmt"
 	"html/template"
 	"os"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
 )
+
+//go:embed templates/report.html
+var embeddedReportTemplate string
 
 // scannerStatus holds the display data for a single scanner row in the report.
 type scannerStatus struct {
@@ -120,10 +124,21 @@ func (h *HTMLReporter) Generate(results []scanner.ScanResult, host string, outpu
 		Scanners: statuses,
 	}
 
-	// Parse template — html/template auto-escapes all string fields (XSS safe).
-	tmpl, err := template.ParseFiles(h.templatePath)
-	if err != nil {
-		return fmt.Errorf("html reporter: parse template %q: %w", h.templatePath, err)
+	// Parse template — prefer embedded template; fall back to filesystem path when
+	// a custom template is explicitly provided and differs from the default.
+	var tmpl *template.Template
+	if h.templatePath == "" {
+		t, parseErr := template.New("report.html").Parse(embeddedReportTemplate)
+		if parseErr != nil {
+			return fmt.Errorf("html reporter: parse embedded template: %w", parseErr)
+		}
+		tmpl = t
+	} else {
+		t, parseErr := template.ParseFiles(h.templatePath)
+		if parseErr != nil {
+			return fmt.Errorf("html reporter: parse template %q: %w", h.templatePath, parseErr)
+		}
+		tmpl = t
 	}
 
 	// Create output file.
