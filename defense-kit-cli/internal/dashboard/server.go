@@ -3,37 +3,144 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"html/template"
+	"io/fs"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+	"github.com/nunenuh/defense-kit/defense-kit-cli/internal/tools"
 )
 
 // Server is the HTTP server that powers the local security dashboard.
 type Server struct {
 	db        *DB
 	registry  *scanner.Registry
+	toolReg   *tools.ToolRegistry
 	port      int
 	mux       *http.ServeMux
 	bgScanner *BackgroundScanner
+	pages     map[string]*template.Template // page name → layout+page template
+}
+
+// pageData is the common data passed to every HTML template.
+type pageData struct {
+	Title          string
+	Active         string
+	Host           string
+	LastScan       string
+	Summary        severitySummary
+	RecentFindings []findingRow
+	Findings       []findingRow
+	Scans          []ScanRecord
+	Scanners       []scannerInfo
+	Tools          []tools.ToolStatus
+}
+
+type severitySummary struct {
+	Critical int
+	High     int
+	Medium   int
+	Low      int
+	Total    int
+}
+
+type findingRow struct {
+	ID            string
+	Scanner       string
+	Severity      int
+	SeverityLabel string
+	SeverityClass string
+	Title         string
+	Detail        string
+	Evidence      string
+	Location      string
+	Remediation   string
+	CanAutoFix    bool
+}
+
+type scannerInfo struct {
+	Name        string
+	Category    string
+	Available   bool
+	Description string
+}
+
+func severityLabel(sev int) string {
+	switch scanner.Severity(sev) {
+	case scanner.SevCritical:
+		return "CRITICAL"
+	case scanner.SevHigh:
+		return "HIGH"
+	case scanner.SevMedium:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
+}
+
+func severityClass(sev int) string {
+	switch scanner.Severity(sev) {
+	case scanner.SevCritical:
+		return "critical"
+	case scanner.SevHigh:
+		return "high"
+	case scanner.SevMedium:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func findingsToRows(findings []scanner.Finding) []findingRow {
+	rows := make([]findingRow, len(findings))
+	for i, f := range findings {
+		rows[i] = findingRow{
+			ID:            f.ID,
+			Scanner:       f.Scanner,
+			Severity:      int(f.Severity),
+			SeverityLabel: severityLabel(int(f.Severity)),
+			SeverityClass: severityClass(int(f.Severity)),
+			Title:         f.Title,
+			Detail:        f.Detail,
+			Evidence:      f.Evidence,
+			Location:      f.Location,
+			Remediation:   f.Remediation,
+			CanAutoFix:    f.CanAutoFix,
+		}
+	}
+	return rows
 }
 
 // NewServer creates a Server wired to the given DB and scanner Registry.
 func NewServer(db *DB, registry *scanner.Registry, port int) *Server {
 	bg := NewBackgroundScanner(db, registry, 6*time.Hour)
+
+	// Parse templates: each page = layout.html + page.html
+	pageNames := []string{"home.html", "findings.html", "history.html", "scanners.html", "settings.html"}
+	pages := make(map[string]*template.Template)
+	for _, name := range pageNames {
+		t, err := template.ParseFS(TemplateFS, "templates/layout.html", "templates/"+name)
+		if err == nil {
+			pages[name] = t
+		}
+	}
+
 	s := &Server{
 		db:        db,
 		registry:  registry,
+		toolReg:   tools.DefaultToolRegistry(),
 		port:      port,
 		mux:       http.NewServeMux(),
 		bgScanner: bg,
+		pages:     pages,
 	}
 	s.setupRoutes()
 	return s
 }
 
-// Start begins listening on 127.0.0.1:{port}.  It starts the background scanner,
-// then blocks until the server returns an error (e.g. the listener is closed).
+// Start begins listening on 127.0.0.1:{port}.
 func (s *Server) Start() error {
 	s.bgScanner.Start()
 	defer s.bgScanner.Stop()
@@ -61,8 +168,11 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/scanners", s.handleScannersPage)
 	s.mux.HandleFunc("/settings", s.handleSettingsPage)
 
-	// Static assets.
-	s.mux.Handle("/static/", http.FileServer(http.FS(StaticFS)))
+	// Static assets (embedded).
+	staticFS, err := fs.Sub(StaticFS, "static")
+	if err == nil {
+		s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	}
 
 	// Core JSON API.
 	s.mux.HandleFunc("/api/status", s.handleAPIStatus)
@@ -99,63 +209,123 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/export/", s.handleAPIExport)
 }
 
+// renderPage renders a page template within the layout.
+// The page .html file must define {{define "content"}}...{{end}}.
+// We execute layout.html which calls {{template "content" .}}.
+func (s *Server) renderPage(w http.ResponseWriter, page string, data pageData) {
+	tmpl, ok := s.pages[page]
+	if !ok || tmpl == nil {
+		http.Error(w, "template not found: "+page, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, "layout.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// buildHomeData loads data for the home page.
+func (s *Server) buildHomeData() pageData {
+	host, _ := os.Hostname()
+
+	data := pageData{
+		Title:  "Overview",
+		Active: "home",
+		Host:   host,
+	}
+
+	// Get latest scan
+	scanID, err := s.db.GetLatestScanID()
+	if err == nil && scanID != "" {
+		scan, err := s.db.GetScan(scanID)
+		if err == nil {
+			data.LastScan = scan.Timestamp.Format("2006-01-02 15:04")
+			data.Summary = severitySummary{
+				Critical: scan.Critical,
+				High:     scan.High,
+				Medium:   scan.Medium,
+				Low:      scan.Low,
+				Total:    scan.Total,
+			}
+		}
+		// Recent findings (top 20)
+		findings, _ := s.db.GetFindings(scanID)
+		if len(findings) > 20 {
+			findings = findings[:20]
+		}
+		data.RecentFindings = findingsToRows(findings)
+	} else {
+		data.LastScan = "never"
+	}
+
+	return data
+}
+
 // handleHome renders the dashboard home page.
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><title>Defense Kit Dashboard</title></head>
-<body>
-<h1>Defense Kit Dashboard</h1>
-<nav>
-  <a href="/findings">Findings</a> |
-  <a href="/history">History</a> |
-  <a href="/scanners">Scanners</a> |
-  <a href="/settings">Settings</a>
-</nav>
-<p>API endpoints: <a href="/api/status">/api/status</a></p>
-</body></html>`)
+	data := s.buildHomeData()
+	s.renderPage(w, "home.html", data)
 }
 
 // handleFindingsPage renders the findings HTML page.
 func (s *Server) handleFindingsPage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><title>Findings — Defense Kit</title></head>
-<body><h1>Findings</h1>
-<p>See <a href="/api/findings">/api/findings</a> for JSON data.</p>
-</body></html>`)
+	data := pageData{
+		Title:  "Findings",
+		Active: "findings",
+	}
+
+	scanID, _ := s.db.GetLatestScanID()
+	if scanID != "" {
+		findings, _ := s.db.GetFindings(scanID)
+		data.Findings = findingsToRows(findings)
+	}
+
+	s.renderPage(w, "findings.html", data)
 }
 
 // handleHistoryPage renders the scan history HTML page.
 func (s *Server) handleHistoryPage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><title>Scan History — Defense Kit</title></head>
-<body><h1>Scan History</h1>
-<p>See <a href="/api/history">/api/history</a> for JSON data.</p>
-</body></html>`)
+	data := pageData{
+		Title:  "History",
+		Active: "history",
+	}
+
+	scans, _ := s.db.GetScans(50)
+	data.Scans = scans
+
+	s.renderPage(w, "history.html", data)
 }
 
 // handleScannersPage renders the scanner status HTML page.
 func (s *Server) handleScannersPage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><title>Scanners — Defense Kit</title></head>
-<body><h1>Scanners</h1>
-<p>See <a href="/api/scanners">/api/scanners</a> for JSON data.</p>
-</body></html>`)
+	data := pageData{
+		Title:  "Scanners",
+		Active: "scanners",
+	}
+
+	for _, sc := range s.registry.All() {
+		data.Scanners = append(data.Scanners, scannerInfo{
+			Name:        sc.Name(),
+			Category:    sc.Category(),
+			Available:   sc.Available(),
+			Description: sc.Description(),
+		})
+	}
+
+	data.Tools = s.toolReg.CheckAll()
+
+	s.renderPage(w, "scanners.html", data)
 }
 
 // handleSettingsPage renders the settings HTML page.
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><title>Settings — Defense Kit</title></head>
-<body><h1>Settings</h1>
-<p>See <a href="/api/settings">/api/settings</a> for JSON data.</p>
-</body></html>`)
+	data := pageData{
+		Title:  "Settings",
+		Active: "settings",
+	}
+	s.renderPage(w, "settings.html", data)
 }
