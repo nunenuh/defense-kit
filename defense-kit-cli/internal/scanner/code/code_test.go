@@ -779,3 +779,180 @@ func TestDockerRuntimeScanner_NoFindingWhenSocketAbsent(t *testing.T) {
 		t.Errorf("expected 0 findings when socket absent, got %d: %+v", len(findings), findings)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WebshellScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestWebshellScanner_Interface(t *testing.T) {
+	s := code.NewWebshellScanner()
+
+	if s.Name() != "webshell" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "webshell")
+	}
+	if s.Category() != "code" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "code")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should be nil")
+	}
+
+	var _ scanner.Scanner = s
+}
+
+// TestWebshellScanner_DetectsPHPEval creates a synthetic PHP file containing
+// eval() and verifies a HIGH (or CRITICAL if recent) finding is produced.
+func TestWebshellScanner_DetectsPHPEval(t *testing.T) {
+	dir := t.TempDir()
+	phpFile := filepath.Join(dir, "shell.php")
+	content := "<?php eval($_GET['cmd']); ?>\n"
+	if err := os.WriteFile(phpFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewWebshellScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "webshell" && strings.Contains(f.Title, "eval") {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+			if f.Remediation == "" {
+				t.Error("finding has empty Remediation")
+			}
+			if f.Severity < scanner.SevHigh {
+				t.Errorf("expected severity >= HIGH, got %s", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected webshell finding for eval(), got: %+v", findings)
+	}
+}
+
+// TestWebshellScanner_DetectsJSPRuntimeExec creates a synthetic JSP file
+// containing Runtime.getRuntime().exec() and verifies a HIGH finding is produced.
+func TestWebshellScanner_DetectsJSPRuntimeExec(t *testing.T) {
+	dir := t.TempDir()
+	jspFile := filepath.Join(dir, "cmd.jsp")
+	content := `<%@ page import="java.io.*" %>
+<% Runtime.getRuntime().exec(request.getParameter("cmd")); %>
+`
+	if err := os.WriteFile(jspFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewWebshellScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "webshell" && strings.Contains(f.Title, "Runtime.exec") {
+			found = true
+			if f.Severity < scanner.SevHigh {
+				t.Errorf("expected severity >= HIGH, got %s", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected webshell finding for JSP Runtime.exec(), got: %+v", findings)
+	}
+}
+
+// TestWebshellScanner_SkipsNonWebExtensions verifies that files with
+// non-web extensions (e.g. .go, .txt) are not flagged even if they
+// contain webshell-like content.
+func TestWebshellScanner_SkipsNonWebExtensions(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	content := "// eval( system( exec(\npackage main\n"
+	if err := os.WriteFile(goFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewWebshellScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Scanner == "webshell" {
+			t.Errorf("unexpected webshell finding for .go file: %+v", f)
+		}
+	}
+}
+
+// TestWebshellScanner_CleanPHPNoFindings verifies that a clean PHP file
+// with no webshell indicators produces no findings.
+func TestWebshellScanner_CleanPHPNoFindings(t *testing.T) {
+	dir := t.TempDir()
+	phpFile := filepath.Join(dir, "index.php")
+	content := "<?php\necho 'Hello, World!';\n?>\n"
+	if err := os.WriteFile(phpFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewWebshellScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Scanner == "webshell" {
+			t.Errorf("unexpected webshell finding for clean PHP file: %+v", f)
+		}
+	}
+}
+
+// TestWebshellScanner_SkipsLargeFiles verifies that files larger than 1 MB
+// are not scanned (to match the maxFileSize constraint).
+func TestWebshellScanner_SkipsLargeFiles(t *testing.T) {
+	dir := t.TempDir()
+	phpFile := filepath.Join(dir, "large.php")
+	// Write 1 MB + 1 byte of content that would trigger a finding if scanned.
+	data := make([]byte, 1*1024*1024+1)
+	copy(data, []byte("<?php eval($_GET['cmd']); ?>"))
+	if err := os.WriteFile(phpFile, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewWebshellScanner()
+	opts := scanner.ScanOptions{TargetPaths: []string{dir}}
+	findings, err := s.Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Scanner == "webshell" {
+			t.Errorf("unexpected webshell finding for large file: %+v", f)
+		}
+	}
+}

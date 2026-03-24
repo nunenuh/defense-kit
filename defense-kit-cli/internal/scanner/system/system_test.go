@@ -648,3 +648,143 @@ func TestAuditdScanner_RunningAuditd(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// EBPFScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestEBPFScanner_Interface(t *testing.T) {
+	s := system.NewEBPFScanner()
+
+	if got := s.Name(); got != "ebpf" {
+		t.Errorf("Name() = %q, want %q", got, "ebpf")
+	}
+	if got := s.Category(); got != "system" {
+		t.Errorf("Category() = %q, want %q", got, "system")
+	}
+	if !s.RequiresRoot() {
+		t.Error("RequiresRoot() should be true")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Errorf("RequiredTools() = %v, want nil", s.RequiredTools())
+	}
+	optTools := s.OptionalTools()
+	if len(optTools) == 0 {
+		t.Error("OptionalTools() should advertise bpftool")
+	}
+
+	var _ scanner.Scanner = s
+}
+
+func TestEBPFScanner_DoesNotPanic(t *testing.T) {
+	s := system.NewEBPFScanner()
+	// Scan may return no findings (bpftool absent) or findings — both are fine.
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Logf("Scan returned error (may be expected without root): %v", err)
+	}
+}
+
+// TestEBPFScanner_DetectsUnprivilegedBPF creates a fake /proc/sys tree with
+// kernel.unprivileged_bpf_disabled=0 and verifies a MEDIUM finding is produced.
+func TestEBPFScanner_DetectsUnprivilegedBPF(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write the sysctl file that the scanner reads via procSysPath.
+	sysctlDir := filepath.Join(dir, "kernel")
+	if err := os.MkdirAll(sysctlDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sysctlDir, "unprivileged_bpf_disabled"), []byte("0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// dir acts as the /proc/sys base; nonexistent raw path → no raw socket finding.
+	s := system.NewEBPFScannerWithPaths(filepath.Join(dir, "nonexistent-raw"), dir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "ebpf" &&
+			f.Title == "Unprivileged eBPF is enabled" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for unprivileged_bpf_disabled=0, got: %+v", findings)
+	}
+}
+
+// TestEBPFScanner_DetectsRawSockets creates a fake /proc/net/raw file with
+// one entry and verifies a MEDIUM finding is produced.
+func TestEBPFScanner_DetectsRawSockets(t *testing.T) {
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, "raw")
+
+	// Write a minimal /proc/net/raw with one socket entry.
+	content := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	content += "   0: 00000000:0000 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 12345 2 0000000000000000 0\n"
+	if err := os.WriteFile(rawPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := system.NewEBPFScannerWithProcNetRaw(rawPath)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevMedium && f.Scanner == "ebpf" &&
+			f.Title == "Raw sockets detected" {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for raw sockets, got: %+v", findings)
+	}
+}
+
+// TestEBPFScanner_NoFindingsForEmptyRaw verifies that an empty /proc/net/raw
+// (header only) produces no raw-socket finding.
+func TestEBPFScanner_NoFindingsForEmptyRaw(t *testing.T) {
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, "raw")
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	if err := os.WriteFile(rawPath, []byte(header), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := system.NewEBPFScannerWithProcNetRaw(rawPath)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Title == "Raw sockets detected" {
+			t.Errorf("unexpected raw-socket finding for empty /proc/net/raw: %+v", f)
+		}
+	}
+}

