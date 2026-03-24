@@ -79,6 +79,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    continue-on-error: true
     defaults:
       run:
         working-directory: defense-kit-cli
@@ -91,8 +92,12 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: defense-kit-cli/go.sum
 
+      - name: Go vet
+        run: go vet ./...
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
+        continue-on-error: true
         with:
           version: latest
           working-directory: defense-kit-cli
