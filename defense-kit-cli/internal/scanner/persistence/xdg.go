@@ -58,6 +58,16 @@ func newXDGAutoStartScannerWithPaths(systemDir, homeBase string) *XDGAutoStartSc
 	}
 }
 
+// NewXDGAutoStartScannerWithHomeBase creates an XDGAutoStartScanner that uses
+// the given directory as homeBase (scans <homeBase>/*/.config/autostart).
+// For testing: place user dirs directly under homeBase.
+func NewXDGAutoStartScannerWithHomeBase(homeBase string) *XDGAutoStartScanner {
+	return &XDGAutoStartScanner{
+		systemDir: "", // no system-wide dir
+		homeBase:  homeBase,
+	}
+}
+
 func (s *XDGAutoStartScanner) Name() string            { return "xdg_autostart" }
 func (s *XDGAutoStartScanner) Category() string        { return "persistence" }
 func (s *XDGAutoStartScanner) RequiresRoot() bool      { return false }

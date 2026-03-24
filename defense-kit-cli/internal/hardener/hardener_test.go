@@ -2,6 +2,7 @@ package hardener_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -611,5 +612,327 @@ func TestExecuteRollback_Reverse(t *testing.T) {
 		if string(data) != f.content {
 			t.Errorf("file %s after rollback = %q, want %q", f.target, string(data), f.content)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mockHardener with FileEdit actions (for Engine backup path coverage)
+// ---------------------------------------------------------------------------
+
+// fileEditMockHardener returns a FixPlan with a FileEdit action pointing to a
+// real temp file so the Engine's backup path is exercised.
+type fileEditMockHardener struct {
+	name       string
+	targetFile string // path to the real file that will be backed up
+	applyErr   error
+	verifyErr  error
+}
+
+func (f *fileEditMockHardener) Name() string { return f.name }
+func (f *fileEditMockHardener) CanFix(_ scanner.Finding) bool { return true }
+func (f *fileEditMockHardener) Preview(finding scanner.Finding) hardener.FixPlan {
+	return hardener.FixPlan{
+		Finding:     finding,
+		Description: "file edit mock",
+		Actions: []hardener.FixAction{
+			{Type: hardener.FileEdit, Target: f.targetFile},
+		},
+	}
+}
+func (f *fileEditMockHardener) Apply(_ context.Context, _ hardener.FixPlan) error {
+	return f.applyErr
+}
+func (f *fileEditMockHardener) Verify(_ context.Context, _ hardener.FixPlan) error {
+	return f.verifyErr
+}
+func (f *fileEditMockHardener) Rollback(_ context.Context, _ hardener.FixPlan) error { return nil }
+
+// ---------------------------------------------------------------------------
+// Additional Engine tests
+// ---------------------------------------------------------------------------
+
+func TestEngine_DryRun_MultipleFindings(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	mock := &mockHardener{
+		name:   "multi",
+		canFix: func(f scanner.Finding) bool { return f.Scanner == "ssh" },
+	}
+	reg.Register(mock)
+
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "a", Scanner: "ssh", Title: "PermitRootLogin", Severity: scanner.SevHigh},
+		{ID: "b", Scanner: "ssh", Title: "PasswordAuthentication", Severity: scanner.SevMedium},
+		{ID: "c", Scanner: "network", Title: "Open port"},
+		{ID: "d", Scanner: "ssh", Title: "MaxAuthTries", Severity: scanner.SevLow},
+	}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("Engine.Run dry-run error: %v", err)
+	}
+
+	// Three SSH findings are fixable; network is not.
+	if len(results) != 3 {
+		t.Fatalf("expected 3 dry-run results, got %d", len(results))
+	}
+	for _, r := range results {
+		if r.Applied {
+			t.Errorf("finding %q: Applied should be false in dry-run", r.Finding.ID)
+		}
+	}
+}
+
+func TestEngine_AutoLow_SkipsCritical(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+	mock := &succeedingMockHardener{
+		name:   "multi",
+		canFix: func(f scanner.Finding) bool { return true },
+	}
+	reg.Register(mock)
+
+	outDir := t.TempDir()
+	engine := hardener.NewEngine(reg, outDir)
+
+	findings := []scanner.Finding{
+		{ID: "low1", Scanner: "ssh", Title: "low", Severity: scanner.SevLow},
+		{ID: "med1", Scanner: "ssh", Title: "med", Severity: scanner.SevMedium},
+		{ID: "crit1", Scanner: "ssh", Title: "crit", Severity: scanner.SevCritical},
+		{ID: "high1", Scanner: "ssh", Title: "high", Severity: scanner.SevHigh},
+	}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{Mode: hardener.ModeAutoLow})
+	if err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	for _, r := range results {
+		switch r.Finding.Severity {
+		case scanner.SevLow, scanner.SevMedium:
+			if !r.Applied {
+				t.Errorf("LOW/MEDIUM finding %q should be applied in AutoLow mode", r.Finding.ID)
+			}
+		case scanner.SevHigh, scanner.SevCritical:
+			if r.Applied {
+				t.Errorf("HIGH/CRITICAL finding %q should NOT be applied in AutoLow mode", r.Finding.ID)
+			}
+		}
+	}
+}
+
+func TestEngine_FileEdit_BackupAndApply(t *testing.T) {
+	// Create a real temp file to back up.
+	srcDir := t.TempDir()
+	targetFile := filepath.Join(srcDir, "target.conf")
+	if err := os.WriteFile(targetFile, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	outDir := t.TempDir()
+
+	reg := hardener.NewHardenerRegistry()
+	mock := &fileEditMockHardener{
+		name:       "file-edit-mock",
+		targetFile: targetFile,
+	}
+	reg.Register(mock)
+
+	engine := hardener.NewEngine(reg, outDir)
+	findings := []scanner.Finding{{ID: "fe1", Scanner: "any", Title: "test", Severity: scanner.SevLow}}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{Mode: hardener.ModeInteractive})
+	if err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Applied {
+		t.Errorf("expected Applied=true; error=%q", results[0].Error)
+	}
+}
+
+func TestEngine_FileEdit_BackupFails(t *testing.T) {
+	outDir := t.TempDir()
+
+	reg := hardener.NewHardenerRegistry()
+	mock := &fileEditMockHardener{
+		name:       "file-edit-fail-backup",
+		targetFile: "/nonexistent/file/that/cannot/be/backed/up.conf",
+	}
+	reg.Register(mock)
+
+	engine := hardener.NewEngine(reg, outDir)
+	findings := []scanner.Finding{{ID: "fb1", Scanner: "any", Title: "test", Severity: scanner.SevLow}}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{Mode: hardener.ModeInteractive})
+	if err != nil {
+		t.Fatalf("Engine.Run should not return error on backup failure (non-fatal): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (with error), got %d", len(results))
+	}
+	if results[0].Applied {
+		t.Error("Applied should be false when backup fails")
+	}
+	if results[0].Error == "" {
+		t.Error("Error should be non-empty when backup fails")
+	}
+}
+
+func TestEngine_VerifyFails_Rollback(t *testing.T) {
+	// Create a real temp file.
+	srcDir := t.TempDir()
+	targetFile := filepath.Join(srcDir, "target.conf")
+	if err := os.WriteFile(targetFile, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	outDir := t.TempDir()
+
+	reg := hardener.NewHardenerRegistry()
+	mock := &fileEditMockHardener{
+		name:       "verify-fail-mock",
+		targetFile: targetFile,
+		verifyErr:  fmt.Errorf("verify deliberately fails"),
+	}
+	reg.Register(mock)
+
+	engine := hardener.NewEngine(reg, outDir)
+	findings := []scanner.Finding{{ID: "vf1", Scanner: "any", Title: "test", Severity: scanner.SevLow}}
+
+	results, err := engine.Run(context.Background(), findings, hardener.HardenOptions{Mode: hardener.ModeInteractive})
+	if err != nil {
+		t.Fatalf("Engine.Run error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Applied {
+		t.Error("Applied should be true (apply succeeded, verify failed)")
+	}
+	if !strings.Contains(results[0].Error, "verify failed") {
+		t.Errorf("expected 'verify failed' in Error, got %q", results[0].Error)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional Rollback tests
+// ---------------------------------------------------------------------------
+
+func TestGenerateRollbackScript_ContentVerification(t *testing.T) {
+	outDir := t.TempDir()
+	backupDir := t.TempDir()
+	scriptPath := filepath.Join(outDir, "rollback-verify.sh")
+
+	plan := hardener.RollbackPlan{
+		SessionID: "sess-verify",
+		Timestamp: time.Now(),
+		Steps: []hardener.RollbackStep{
+			{
+				Description: "Restore /etc/ssh/sshd_config",
+				BackupPath:  filepath.Join(backupDir, "sshd_config.bak"),
+				Action: hardener.FixAction{
+					Type:   hardener.FileEdit,
+					Target: "/etc/ssh/sshd_config",
+				},
+			},
+			{
+				Description: "Restore /etc/sysctl.d/99-defense-kit.conf",
+				BackupPath:  "",
+				Action: hardener.FixAction{
+					Type:   hardener.FileDelete,
+					Target: "/etc/sysctl.d/99-defense-kit.conf",
+				},
+			},
+		},
+	}
+
+	if err := hardener.GenerateRollbackScript(plan, scriptPath); err != nil {
+		t.Fatalf("GenerateRollbackScript: %v", err)
+	}
+
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	content := string(data)
+
+	if !strings.HasPrefix(content, "#!/bin/bash") {
+		t.Error("script does not start with #!/bin/bash")
+	}
+	if !strings.Contains(content, "set -euo pipefail") {
+		t.Error("script missing 'set -euo pipefail'")
+	}
+	if !strings.Contains(content, "sess-verify") {
+		t.Error("script does not contain session ID")
+	}
+	if !strings.Contains(content, "Restore /etc/ssh/sshd_config") {
+		t.Error("script does not contain first step description")
+	}
+	if !strings.Contains(content, "cp ") {
+		t.Error("script does not contain cp command")
+	}
+}
+
+// TestEngine_ApplyError_EarlyReturn exercises the applyErr != nil path inside
+// engine.Run which returns early with an error.
+func TestEngine_ApplyError_EarlyReturn(t *testing.T) {
+	srcDir := t.TempDir()
+	targetFile := filepath.Join(srcDir, "target.conf")
+	if err := os.WriteFile(targetFile, []byte("data\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	outDir := t.TempDir()
+
+	reg := hardener.NewHardenerRegistry()
+	mock := &fileEditMockHardener{
+		name:       "apply-error-mock",
+		targetFile: targetFile,
+		applyErr:   fmt.Errorf("apply deliberately fails"),
+	}
+	reg.Register(mock)
+
+	engine := hardener.NewEngine(reg, outDir)
+	findings := []scanner.Finding{{ID: "ae1", Scanner: "any", Title: "test", Severity: scanner.SevLow}}
+
+	_, err := engine.Run(context.Background(), findings, hardener.HardenOptions{Mode: hardener.ModeInteractive})
+	if err == nil {
+		t.Error("Engine.Run should return error when Apply fails")
+	}
+	if !strings.Contains(err.Error(), "apply failed") {
+		t.Errorf("expected 'apply failed' in error, got %q", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional Registry tests
+// ---------------------------------------------------------------------------
+
+func TestRegistryFixableFindings_MixedFixable(t *testing.T) {
+	reg := hardener.NewHardenerRegistry()
+
+	sshH := &mockHardener{name: "ssh", canFix: func(f scanner.Finding) bool { return f.Scanner == "ssh" }}
+	fwH := &mockHardener{name: "firewall", canFix: func(f scanner.Finding) bool { return f.Scanner == "firewall" }}
+	reg.Register(sshH)
+	reg.Register(fwH)
+
+	findings := []scanner.Finding{
+		{ID: "1", Scanner: "ssh"},
+		{ID: "2", Scanner: "network"},  // non-fixable
+		{ID: "3", Scanner: "firewall"},
+		{ID: "4", Scanner: "rootkit"},  // non-fixable
+		{ID: "5", Scanner: "ssh"},
+	}
+
+	fixable := reg.FixableFindings(findings)
+	if len(fixable) != 3 {
+		t.Errorf("expected 3 fixable findings, got %d", len(fixable))
 	}
 }

@@ -191,9 +191,35 @@ func TestGitHooksScanner_DetectsMaliciousHook(t *testing.T) {
 	}
 }
 
-// TestGitHooksScanner_FlagsUnknownExecutableHook verifies that an executable
-// hook with no malicious patterns but no known framework signature gets a
-// MEDIUM finding.
+// TestCredentialsScanner_CleanDirNoFindings verifies no credential findings in an empty dir.
+func TestCredentialsScanner_CleanDirNoFindings(t *testing.T) {
+	dir := t.TempDir()
+	// Write a clean file with no credential patterns.
+	if err := os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := code.NewCredentialsScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings in clean dir, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestContainersScanner_NoDockerfilesNoFindings verifies no findings when no Dockerfiles present.
+func TestContainersScanner_NoDockerfilesNoFindings(t *testing.T) {
+	s := code.NewContainersScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings with no Dockerfiles, got %d", len(findings))
+	}
+}
+
 func TestGitHooksScanner_FlagsUnknownExecutableHook(t *testing.T) {
 	dir := t.TempDir()
 	hooksDir := filepath.Join(dir, ".git", "hooks")
@@ -954,5 +980,361 @@ func TestWebshellScanner_SkipsLargeFiles(t *testing.T) {
 		if f.Scanner == "webshell" {
 			t.Errorf("unexpected webshell finding for large file: %+v", f)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mockToolRunner — used by supply-chain, containers, and git-hooks tests
+// ---------------------------------------------------------------------------
+
+type mockToolRunner struct {
+	available map[string]bool
+	outputs   map[string][]byte
+}
+
+func (m *mockToolRunner) Available(tool string) bool {
+	return m.available[tool]
+}
+
+func (m *mockToolRunner) Run(_ context.Context, tool string, _ []string) ([]byte, error) {
+	if out, ok := m.outputs[tool]; ok {
+		return out, nil
+	}
+	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// SupplyChainScanner — functional tests with mock ToolRunner
+// ---------------------------------------------------------------------------
+
+func TestSupplyChainScanner_NoToolRunnerReturnsNil(t *testing.T) {
+	s := code.NewSupplyChainScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings without ToolRunner, got %v", findings)
+	}
+}
+
+func TestSupplyChainScanner_TrivyNotAvailableReturnsNil(t *testing.T) {
+	s := code.NewSupplyChainScanner()
+	tr := &mockToolRunner{available: map[string]bool{"trivy": false}}
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings when trivy unavailable, got %v", findings)
+	}
+}
+
+func TestSupplyChainScanner_NoTargetPathsReturnsNil(t *testing.T) {
+	s := code.NewSupplyChainScanner()
+	tr := &mockToolRunner{available: map[string]bool{"trivy": true}}
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings when no target paths, got %v", findings)
+	}
+}
+
+func TestSupplyChainScanner_TrivyWithEmptyOutputNoFindings(t *testing.T) {
+	dir := t.TempDir()
+	s := code.NewSupplyChainScanner()
+	tr := &mockToolRunner{
+		available: map[string]bool{"trivy": true},
+		outputs:   map[string][]byte{"trivy": []byte(`{}`)},
+	}
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{
+		ToolRunner:  tr,
+		TargetPaths: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Empty trivy JSON yields no actionable findings.
+	_ = findings
+}
+
+func TestSupplyChainScanner_RequiredAndOptionalTools(t *testing.T) {
+	s := code.NewSupplyChainScanner()
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should return nil")
+	}
+	opt := s.OptionalTools()
+	if len(opt) == 0 {
+		t.Error("OptionalTools() should advertise trivy/grype")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContainersScanner — functional tests
+// ---------------------------------------------------------------------------
+
+func TestContainersScanner_NoTargetPathsReturnsNil(t *testing.T) {
+	s := code.NewContainersScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings without target paths, got %v", findings)
+	}
+}
+
+func TestContainersScanner_NoDockerfilesReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	// Write a non-Dockerfile file.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := code.NewContainersScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings without Dockerfiles, got %v", findings)
+	}
+}
+
+func TestContainersScanner_DockerfileButNoHadolintReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM ubuntu\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := code.NewContainersScanner()
+	// No ToolRunner => hadolint unavailable.
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings without hadolint, got %v", findings)
+	}
+}
+
+func TestContainersScanner_HadolintErrorFindingParsed(t *testing.T) {
+	dir := t.TempDir()
+	dockerfilePath := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM ubuntu\nRUN apt-get install curl\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Simulate hadolint returning a JSON finding.
+	hadolintJSON := `[{"line":2,"code":"DL3008","message":"Pin versions in apt get install.","level":"warning","file":"` + dockerfilePath + `"}]`
+	tr := &mockToolRunner{
+		available: map[string]bool{"hadolint": true},
+		outputs:   map[string][]byte{"hadolint": []byte(hadolintJSON)},
+	}
+	s := code.NewContainersScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{
+		ToolRunner:  tr,
+		TargetPaths: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding from hadolint output")
+	}
+	f := findings[0]
+	if f.Scanner != "containers" {
+		t.Errorf("Scanner = %q, want containers", f.Scanner)
+	}
+	if f.ID == "" {
+		t.Error("finding has empty ID")
+	}
+}
+
+func TestContainersScanner_RequiredAndOptionalTools(t *testing.T) {
+	s := code.NewContainersScanner()
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should return nil")
+	}
+	opt := s.OptionalTools()
+	if len(opt) == 0 {
+		t.Error("OptionalTools() should advertise hadolint/dockle")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GitHooksScanner — additional tests (detect/base64 pattern)
+// ---------------------------------------------------------------------------
+
+func TestGitHooksScanner_DetectsBase64Pattern(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// post-checkout hook with base64-encoded payload.
+	hookContent := "#!/bin/sh\necho aGVsbG8= | base64 -d | sh\n"
+	hookPath := filepath.Join(hooksDir, "post-checkout")
+	if err := os.WriteFile(hookPath, []byte(hookContent), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := code.NewGitHooksScanner()
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{TargetPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Scanner == "git_hooks" && f.Severity == scanner.SevCritical {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for base64 hook, got: %+v", findings)
+	}
+}
+
+func TestGitHooksScanner_RequiredAndOptionalTools(t *testing.T) {
+	s := code.NewGitHooksScanner()
+	if s.RequiredTools() != nil {
+		t.Error("RequiredTools() should return nil")
+	}
+	if s.OptionalTools() != nil {
+		t.Error("OptionalTools() should return nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DockerRuntimeScanner — ToolRunner coverage for checkRunningContainers
+// ---------------------------------------------------------------------------
+
+// TestDockerRuntimeScanner_HostNetworkContainer verifies that a container with
+// host networking is flagged HIGH.
+func TestDockerRuntimeScanner_HostNetworkContainer(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	// Create a restricted socket so socket-permissions check passes clean.
+	if err := os.WriteFile(socketPath, []byte{}, 0o660); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	psJSON := `{"ID":"abc123","Names":"myapp","Image":"nginx","NetworkMode":"host","Mounts":""}` + "\n"
+	tr := &mockToolRunner{
+		available: map[string]bool{"docker": true},
+		outputs: map[string][]byte{
+			"docker": []byte(psJSON),
+		},
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevHigh && strings.Contains(f.Title, "host networking") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH finding for host-network container, got: %+v", findings)
+	}
+}
+
+// TestDockerRuntimeScanner_HostRootMountContainer verifies that a container
+// with the host root filesystem mounted is flagged CRITICAL.
+func TestDockerRuntimeScanner_HostRootMountContainer(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0o660); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	psJSON := `{"ID":"def456","Names":"dangerous","Image":"alpine","NetworkMode":"bridge","Mounts":"/:/host"}` + "\n"
+	tr := &mockToolRunner{
+		available: map[string]bool{"docker": true},
+		outputs: map[string][]byte{
+			"docker": []byte(psJSON),
+		},
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && strings.Contains(f.Title, "host root filesystem") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for host root mount, got: %+v", findings)
+	}
+}
+
+// TestDockerRuntimeScanner_DockerNotAvailable verifies that when the docker
+// tool is not available via ToolRunner, checkRunningContainers returns nil.
+func TestDockerRuntimeScanner_DockerNotAvailable(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0o660); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tr := &mockToolRunner{
+		available: map[string]bool{"docker": false},
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	for _, f := range findings {
+		if strings.Contains(f.Title, "host networking") || strings.Contains(f.Title, "privileged") {
+			t.Errorf("unexpected docker container finding when docker unavailable: %+v", f)
+		}
+	}
+}
+
+// TestDockerRuntimeScanner_InspectPrivilegedContainer verifies that a privileged
+// container detected via docker inspect is flagged CRITICAL.
+func TestDockerRuntimeScanner_InspectPrivilegedContainer(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "docker.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0o660); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// docker ps -q returns a container ID; docker inspect returns JSON array.
+	inspectJSON := `[{"Id":"abc123def456","Name":"/mycontainer","HostConfig":{"Privileged":true},"Config":{"User":"root"}}]`
+	tr := &mockToolRunner{
+		available: map[string]bool{"docker": true},
+		outputs: map[string][]byte{
+			// Both "docker ps --format" and "docker ps -q" and "docker inspect" use the same key.
+			// The mock returns the same output for all docker calls; that's fine because
+			// "docker ps --format json" output won't parse as inspect JSON and vice versa.
+			"docker": []byte(inspectJSON),
+		},
+	}
+
+	s := code.NewDockerRuntimeScannerWithSocket(socketPath)
+	findings, err := s.Scan(context.Background(), scanner.ScanOptions{ToolRunner: tr})
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	// With the inspect JSON output, inspectContainers should flag privileged=true.
+	found := false
+	for _, f := range findings {
+		if f.Severity == scanner.SevCritical && strings.Contains(f.Title, "privileged") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CRITICAL finding for privileged container, got: %+v", findings)
 	}
 }

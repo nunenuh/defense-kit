@@ -134,6 +134,12 @@ func parseResolvConf(path string) []scanner.Finding {
 	return findings
 }
 
+// ParseSystemdResolved checks a systemd-resolved config file for DNS-over-HTTPS
+// endpoints that point to unknown servers. Exported for testing.
+func ParseSystemdResolved(path string) []scanner.Finding {
+	return parseSystemdResolved(path)
+}
+
 // parseSystemdResolved checks /etc/systemd/resolved.conf for DNS-over-HTTPS
 // endpoints that point to unknown servers.
 func parseSystemdResolved(path string) []scanner.Finding {

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -296,6 +297,396 @@ func TestDashboardIntegration(t *testing.T) {
 	if !strings.Contains(bodyStr, "defense-kit") {
 		t.Errorf("response body does not contain \"defense-kit\"\nbody (first 500 bytes): %s",
 			bodyStr[:min(500, len(bodyStr))])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional HTML page tests
+// ---------------------------------------------------------------------------
+
+func TestFindingsPage_Returns200(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/findings")
+	if err != nil {
+		t.Fatalf("GET /findings: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHistoryPage_Returns200(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/history")
+	if err != nil {
+		t.Fatalf("GET /history: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestScannersPage_Returns200(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/scanners")
+	if err != nil {
+		t.Fatalf("GET /scanners: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHomePage_NotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/nonexistent-path")
+	if err != nil {
+		t.Fatalf("GET /nonexistent-path: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// severityLabel, severityClass, findingsToRows
+// ---------------------------------------------------------------------------
+
+func TestSeverityLabel(t *testing.T) {
+	cases := []struct {
+		sev  int
+		want string
+	}{
+		{int(scanner.SevCritical), "CRITICAL"},
+		{int(scanner.SevHigh), "HIGH"},
+		{int(scanner.SevMedium), "MEDIUM"},
+		{int(scanner.SevLow), "LOW"},
+		{99, "LOW"}, // unknown falls through to LOW
+	}
+	for _, tc := range cases {
+		if got := severityLabel(tc.sev); got != tc.want {
+			t.Errorf("severityLabel(%d) = %q, want %q", tc.sev, got, tc.want)
+		}
+	}
+}
+
+func TestSeverityClass(t *testing.T) {
+	cases := []struct {
+		sev  int
+		want string
+	}{
+		{int(scanner.SevCritical), "critical"},
+		{int(scanner.SevHigh), "high"},
+		{int(scanner.SevMedium), "medium"},
+		{int(scanner.SevLow), "low"},
+		{99, "low"},
+	}
+	for _, tc := range cases {
+		if got := severityClass(tc.sev); got != tc.want {
+			t.Errorf("severityClass(%d) = %q, want %q", tc.sev, got, tc.want)
+		}
+	}
+}
+
+func TestFindingsToRows(t *testing.T) {
+	findings := []scanner.Finding{
+		{
+			ID:          "f1",
+			Scanner:     "ssh",
+			Severity:    scanner.SevCritical,
+			Title:       "SSH Issue",
+			Detail:      "detail",
+			Evidence:    "evidence",
+			Location:    "/etc/ssh",
+			Remediation: "fix it",
+			CanAutoFix:  true,
+		},
+		{
+			ID:       "f2",
+			Scanner:  "firewall",
+			Severity: scanner.SevLow,
+			Title:    "FW Issue",
+		},
+	}
+
+	rows := findingsToRows(findings)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	if rows[0].ID != "f1" {
+		t.Errorf("rows[0].ID = %q, want f1", rows[0].ID)
+	}
+	if rows[0].SeverityLabel != "CRITICAL" {
+		t.Errorf("rows[0].SeverityLabel = %q, want CRITICAL", rows[0].SeverityLabel)
+	}
+	if rows[0].SeverityClass != "critical" {
+		t.Errorf("rows[0].SeverityClass = %q, want critical", rows[0].SeverityClass)
+	}
+	if !rows[0].CanAutoFix {
+		t.Error("rows[0].CanAutoFix should be true")
+	}
+	if rows[1].SeverityLabel != "LOW" {
+		t.Errorf("rows[1].SeverityLabel = %q, want LOW", rows[1].SeverityLabel)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildHomeData with a scan in DB
+// ---------------------------------------------------------------------------
+
+func TestBuildHomeData_WithScan(t *testing.T) {
+	srv, db := testServer(t)
+
+	scan := ScanRecord{
+		ID:        "home-scan",
+		Timestamp: time.Now().UTC(),
+		Host:      "myhost",
+		Status:    "completed",
+		Total:     4,
+		Critical:  1,
+		High:      1,
+		Medium:    1,
+		Low:       1,
+	}
+	if err := db.SaveScan(scan); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SaveFindings("home-scan", []scanner.Finding{
+		{ID: "hf1", Scanner: "s", Severity: scanner.SevHigh, Title: "high"},
+	})
+
+	data := srv.buildHomeData()
+
+	if data.Summary.Total != 4 {
+		t.Errorf("Summary.Total: got %d, want 4", data.Summary.Total)
+	}
+	if data.LastScan == "never" {
+		t.Error("LastScan should not be 'never' when a scan exists")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// generateScanID
+// ---------------------------------------------------------------------------
+
+func TestGenerateScanID(t *testing.T) {
+	id1 := generateScanID()
+	id2 := generateScanID()
+
+	if !strings.HasPrefix(id1, "scan-") {
+		t.Errorf("generateScanID() = %q, want prefix 'scan-'", id1)
+	}
+	// Two calls should produce different IDs (unless they happen in the same nanosecond,
+	// but the format includes nanoseconds so collisions are extremely unlikely).
+	if id1 == id2 {
+		// This is theoretically possible but extremely rare; just log.
+		t.Logf("generateScanID produced identical IDs on two calls: %q", id1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dbPath
+// ---------------------------------------------------------------------------
+
+func TestDbPath(t *testing.T) {
+	p := dbPath()
+	if p == "" {
+		t.Error("dbPath() returned empty string")
+	}
+	if !strings.Contains(p, "dashboard.db") {
+		t.Errorf("dbPath() = %q, expected to contain 'dashboard.db'", p)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAPIScan (method not allowed)
+// ---------------------------------------------------------------------------
+
+func TestAPIScan_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/scan", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPIScan(w, req)
+
+	if w.Result().StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Result().StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FIndingsPage with data (triggers scanner name deduplication path)
+// ---------------------------------------------------------------------------
+
+func TestFindingsPage_WithFindings(t *testing.T) {
+	srv, db := testServer(t)
+
+	scan := ScanRecord{ID: "fp-scan", Timestamp: time.Now().UTC(), Host: "h", Status: "completed"}
+	_ = db.SaveScan(scan)
+	_ = db.SaveFindings("fp-scan", []scanner.Finding{
+		{ID: "f1", Scanner: "ssh", Severity: scanner.SevHigh, Title: "high"},
+		{ID: "f2", Scanner: "ssh", Severity: scanner.SevLow, Title: "low"},
+		{ID: "f3", Scanner: "firewall", Severity: scanner.SevMedium, Title: "med"},
+	})
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/findings")
+	if err != nil {
+		t.Fatalf("GET /findings: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// renderPage with unknown page name → 500
+// ---------------------------------------------------------------------------
+
+func TestRenderPage_UnknownPage(t *testing.T) {
+	srv, _ := testServer(t)
+
+	w := httptest.NewRecorder()
+	srv.renderPage(w, "nonexistent-page.html", pageData{Title: "test"})
+
+	if w.Result().StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 for unknown page, got %d", w.Result().StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleScannersPage with registered scanners (exercises loop body)
+// ---------------------------------------------------------------------------
+
+// minimalScanner is a minimal scanner.Scanner implementation for test use.
+type minimalScanner struct {
+	name        string
+	category    string
+	description string
+	available   bool
+}
+
+func (m *minimalScanner) Name() string             { return m.name }
+func (m *minimalScanner) Category() string         { return m.category }
+func (m *minimalScanner) Description() string      { return m.description }
+func (m *minimalScanner) RequiredTools() []string  { return nil }
+func (m *minimalScanner) OptionalTools() []string  { return nil }
+func (m *minimalScanner) RequiresRoot() bool       { return false }
+func (m *minimalScanner) Available() bool          { return m.available }
+func (m *minimalScanner) Scan(_ context.Context, _ scanner.ScanOptions) ([]scanner.Finding, error) {
+	return nil, nil
+}
+
+func testServerWithScanners(t *testing.T) (*Server, *DB) {
+	t.Helper()
+	srv, db := testServer(t)
+	// Register scanners so the loop inside handleScannersPage is exercised.
+	srv.registry.Register(&minimalScanner{name: "ssh", category: "system", description: "SSH scanner", available: true})
+	srv.registry.Register(&minimalScanner{name: "firewall", category: "network", description: "FW scanner", available: false})
+	return srv, db
+}
+
+func TestScannersPage_WithScanners(t *testing.T) {
+	srv, _ := testServerWithScanners(t)
+
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/scanners")
+	if err != nil {
+		t.Fatalf("GET /scanners: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPIScanners_WithRegisteredScanners(t *testing.T) {
+	srv, _ := testServerWithScanners(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/scanners", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPIScanners(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["total"].(float64) != 2 {
+		t.Errorf("total: got %v, want 2", body["total"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAPIHistory default limit
+// ---------------------------------------------------------------------------
+
+func TestAPIHistory_DefaultLimit(t *testing.T) {
+	srv, db := testServer(t)
+
+	for i := 0; i < 5; i++ {
+		id := "hl" + string(rune('0'+i))
+		_ = db.SaveScan(ScanRecord{ID: id, Timestamp: time.Now().UTC(), Host: "h", Status: "completed"})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/history", nil) // no limit param
+	w := httptest.NewRecorder()
+	srv.handleAPIHistory(w, req)
+
+	var body map[string]interface{}
+	_ = json.NewDecoder(w.Result().Body).Decode(&body)
+	if int(body["total"].(float64)) != 5 {
+		t.Errorf("total: got %v, want 5", body["total"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAPITrend default days
+// ---------------------------------------------------------------------------
+
+func TestAPITrend_DefaultDays(t *testing.T) {
+	srv, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/trend", nil) // no days param
+	w := httptest.NewRecorder()
+	srv.handleAPITrend(w, req)
+
+	var body map[string]interface{}
+	_ = json.NewDecoder(w.Result().Body).Decode(&body)
+	if body["days"].(float64) != 30 {
+		t.Errorf("default days: got %v, want 30", body["days"])
 	}
 }
 

@@ -86,6 +86,15 @@ func NewConnectionsScanner() *ConnectionsScanner {
 	}
 }
 
+// NewConnectionsScannerWithFiles creates a ConnectionsScanner with custom
+// /proc/net/tcp file paths and proc root (for testing).
+func NewConnectionsScannerWithFiles(procNetFiles []string, procRoot string) *ConnectionsScanner {
+	return &ConnectionsScanner{
+		procNetFiles: procNetFiles,
+		procRoot:     procRoot,
+	}
+}
+
 func (s *ConnectionsScanner) Name() string           { return "connections" }
 func (s *ConnectionsScanner) Category() string       { return "network" }
 func (s *ConnectionsScanner) RequiresRoot() bool     { return false }

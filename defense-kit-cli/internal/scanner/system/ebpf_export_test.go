@@ -1,5 +1,12 @@
 package system
 
+import "github.com/nunenuh/defense-kit/defense-kit-cli/internal/scanner"
+
+// ParseBPFToolOutputForTest exposes the unexported parseBPFToolOutput for unit tests.
+func ParseBPFToolOutputForTest(data []byte) []scanner.Finding {
+	return parseBPFToolOutput(data)
+}
+
 // NewEBPFScannerWithProcNetRaw creates an EBPFScanner with a custom
 // /proc/net/raw path and the same path used as the procSysPath base — the
 // tests pass a file path directly as procNetRawPath, and the sysctl checks are

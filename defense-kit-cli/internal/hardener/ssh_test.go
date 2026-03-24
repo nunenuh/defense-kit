@@ -26,6 +26,17 @@ func writeTempConfig(t *testing.T, content string) string {
 }
 
 // ---------------------------------------------------------------------------
+// TestSSHHardener_Name
+// ---------------------------------------------------------------------------
+
+func TestSSHHardener_Name(t *testing.T) {
+	h := hardener.NewSSHHardener()
+	if h.Name() != "ssh" {
+		t.Errorf("Name() = %q, want %q", h.Name(), "ssh")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestSSHHardener_CanFix
 // ---------------------------------------------------------------------------
 
@@ -238,5 +249,215 @@ func TestSSHHardener_Rollback(t *testing.T) {
 	restored, _ := os.ReadFile(configPath)
 	if string(restored) != originalContent {
 		t.Errorf("after Rollback file = %q, want %q", string(restored), originalContent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// All directive types
+// ---------------------------------------------------------------------------
+
+func TestSSHHardener_AllDirectiveTypes(t *testing.T) {
+	directives := []struct {
+		title    string
+		wantKey  string
+		wantVal  string
+	}{
+		{"PermitRootLogin", "PermitRootLogin", "no"},
+		{"Root login enabled", "PermitRootLogin", "no"},
+		{"PasswordAuthentication", "PasswordAuthentication", "no"},
+		{"Password authentication enabled", "PasswordAuthentication", "no"},
+		{"PermitEmptyPasswords", "PermitEmptyPasswords", "no"},
+		{"MaxAuthTries", "MaxAuthTries", "3"},
+	}
+
+	for _, d := range directives {
+		t.Run(d.title, func(t *testing.T) {
+			// Config has the directive set to a different value.
+			initialContent := d.wantKey + " yes\n"
+			configPath := writeTempConfig(t, initialContent)
+			h := hardener.NewSSHHardenerWithConfig(configPath)
+
+			f := scanner.Finding{Scanner: "ssh", Title: d.title}
+			if !h.CanFix(f) {
+				t.Fatalf("CanFix returned false for title %q", d.title)
+			}
+
+			plan := h.Preview(f)
+			if len(plan.Actions) == 0 {
+				t.Fatal("Preview returned no actions")
+			}
+			if plan.Actions[0].Args[0] != d.wantKey {
+				t.Errorf("directive: got %q, want %q", plan.Actions[0].Args[0], d.wantKey)
+			}
+			if plan.Actions[0].Args[1] != d.wantVal {
+				t.Errorf("value: got %q, want %q", plan.Actions[0].Args[1], d.wantVal)
+			}
+
+			if err := h.Apply(context.Background(), plan); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if err := h.Verify(context.Background(), plan); err != nil {
+				t.Errorf("Verify: %v", err)
+			}
+		})
+	}
+}
+
+func TestSSHHardener_AbsentDirective_GetsAdded(t *testing.T) {
+	// Config has no MaxAuthTries directive at all.
+	configPath := writeTempConfig(t, "# empty sshd_config\nPort 22\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "MaxAuthTries"}
+	plan := h.Preview(f)
+
+	if err := h.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// Directive should now be present.
+	data, _ := os.ReadFile(configPath)
+	if !strings.Contains(string(data), "MaxAuthTries 3") {
+		t.Errorf("expected MaxAuthTries 3 to be appended; got:\n%s", string(data))
+	}
+
+	if err := h.Verify(context.Background(), plan); err != nil {
+		t.Errorf("Verify: %v", err)
+	}
+}
+
+func TestSSHHardener_PermitEmptyPasswords_Apply(t *testing.T) {
+	configPath := writeTempConfig(t, "PermitEmptyPasswords yes\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "PermitEmptyPasswords"}
+	plan := h.Preview(f)
+
+	if err := h.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	if !strings.Contains(string(data), "PermitEmptyPasswords no") {
+		t.Errorf("PermitEmptyPasswords not set to no; got:\n%s", string(data))
+	}
+}
+
+func TestSSHHardener_PasswordAuth_Apply(t *testing.T) {
+	configPath := writeTempConfig(t, "PasswordAuthentication yes\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "PasswordAuthentication"}
+	plan := h.Preview(f)
+
+	if err := h.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if err := h.Verify(context.Background(), plan); err != nil {
+		t.Errorf("Verify: %v", err)
+	}
+}
+
+func TestSSHHardener_Rollback_NoBackup(t *testing.T) {
+	configPath := writeTempConfig(t, "PermitRootLogin yes\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "PermitRootLogin"}
+	plan := h.Preview(f)
+	// Do NOT set a backup path.
+
+	err := h.Rollback(context.Background(), plan)
+	if err == nil {
+		t.Error("expected error when rolling back without a backup path")
+	}
+}
+
+// TestSSHHardener_Apply_NoActions exercises the "no actions" early return in Apply.
+func TestSSHHardener_Apply_NoActions(t *testing.T) {
+	h := hardener.NewSSHHardener()
+
+	plan := hardener.FixPlan{} // no actions
+
+	err := h.Apply(context.Background(), plan)
+	if err == nil {
+		t.Error("Apply with no actions should return error")
+	}
+}
+
+// TestSSHHardener_Verify_NoActions exercises the "no actions" early return in Verify.
+func TestSSHHardener_Verify_NoActions(t *testing.T) {
+	h := hardener.NewSSHHardener()
+
+	plan := hardener.FixPlan{} // no actions
+
+	err := h.Verify(context.Background(), plan)
+	if err == nil {
+		t.Error("Verify with no actions should return error")
+	}
+}
+
+// TestSSHHardener_Verify_WrongValue verifies that Verify returns an error when
+// the directive is present but has an unexpected value.
+func TestSSHHardener_Verify_WrongValue(t *testing.T) {
+	configPath := writeTempConfig(t, "PermitRootLogin yes\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "PermitRootLogin"}
+	plan := h.Preview(f)
+	// Don't call Apply; file still has "yes" not "no".
+
+	err := h.Verify(context.Background(), plan)
+	if err == nil {
+		t.Error("Verify should fail when directive has wrong value")
+	}
+}
+
+// TestSSHHardener_Verify_DirectiveNotFound verifies Verify fails when directive is absent.
+func TestSSHHardener_Verify_DirectiveNotFound(t *testing.T) {
+	configPath := writeTempConfig(t, "# no directives here\nPort 22\n")
+	h := hardener.NewSSHHardenerWithConfig(configPath)
+
+	f := scanner.Finding{Scanner: "ssh", Title: "PermitRootLogin"}
+	plan := h.Preview(f)
+
+	err := h.Verify(context.Background(), plan)
+	if err == nil {
+		t.Error("Verify should fail when directive is absent from config")
+	}
+}
+
+// TestSSHHardener_Apply_MissingArgs exercises the "action missing args" path.
+func TestSSHHardener_Apply_MissingArgs(t *testing.T) {
+	h := hardener.NewSSHHardener()
+
+	plan := hardener.FixPlan{
+		Actions: []hardener.FixAction{
+			{Type: hardener.FileEdit, Target: "/etc/ssh/sshd_config"},
+			// No Args — should trigger error.
+		},
+	}
+
+	err := h.Apply(context.Background(), plan)
+	if err == nil {
+		t.Error("Apply with missing args should return error")
+	}
+}
+
+// TestBackupFile_ErrorOnNonExistentSource verifies BackupFile returns error for missing source.
+func TestBackupFile_ErrorOnNonExistentSource(t *testing.T) {
+	backupDir := t.TempDir()
+	_, err := hardener.BackupFile("/nonexistent/file/xyz.conf", backupDir)
+	if err == nil {
+		t.Error("BackupFile should return error for non-existent source")
+	}
+}
+
+// TestRestoreFile_ErrorOnNonExistentBackup verifies RestoreFile returns error for missing backup.
+func TestRestoreFile_ErrorOnNonExistentBackup(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target.conf")
+	err := hardener.RestoreFile("/nonexistent/backup.conf", target)
+	if err == nil {
+		t.Error("RestoreFile should return error for non-existent backup")
 	}
 }
